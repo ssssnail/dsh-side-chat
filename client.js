@@ -584,30 +584,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function switchModel(route) {
-      const state = store.get()
-      if (!state.discussion) return
-      const previous = state.discussion.route
-      // Show the choice immediately; the turn takes it from here.
-      store.set((current) => ({
-        discussion: current.discussion ? { ...current.discussion, route: { ...route } } : current.discussion,
-        notice: null,
-      }))
-      try {
-        const result = await api('/model', { discussionId: state.discussion.discussionId, route })
-        if (!result.ok) throw new Error(result.message ?? '模型切换失败')
-        store.set((current) => ({
-          discussion: current.discussion ? { ...current.discussion, route: result.route } : current.discussion,
-        }))
-      } catch (error) {
-        reportFailure('model', error)
-        store.set((current) => ({
-          discussion: current.discussion ? { ...current.discussion, route: previous } : current.discussion,
-          notice: `模型切换失败：${String(error?.message ?? error)}`,
-        }))
-      }
-    }
-
     async function loadModels() {
       if (store.get().models) return
       try {
@@ -717,8 +693,8 @@ window.__ModuleLoader__.load({
 .sc-tool-status{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
 .sc-tool[data-status="error"] .sc-tool-status{color:var(--dsw-alias-state-error-primary)}
 .sc-tool-text{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
-.sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
-.sc-pill{border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 8px;cursor:pointer}
+.sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 6px 0}
+.sc-pill{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 10px;cursor:pointer}
 .sc-pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .sc-pill[data-static="true"]{cursor:default}
 .sc-pill[data-static="true"]:hover{background:transparent}
@@ -731,9 +707,6 @@ window.__ModuleLoader__.load({
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
 .sc-composer{flex:none;padding:0 12px 8px}
 .sc-usage-dock{display:flex;flex-direction:column;gap:6px;padding:0 8px 2px}
-.sc-usage-line{box-sizing:border-box;display:flex;align-items:center;width:100%;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;padding:2px 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;text-align:left}
-.sc-usage-line:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
-.sc-usage-gap{flex:1 1 auto}
 .sc-usage-detail{display:flex;flex-direction:column;gap:10px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1);margin-bottom:4px}
 .sc-usage-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
 .sc-usage-total{color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:18px;line-height:26px}
@@ -856,6 +829,12 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** The catalogue's display name for a route, when it is known. */
+    function modelName(models, route) {
+      const list = models?.models?.[route?.provider] ?? []
+      return list.find((model) => model.id === route?.model)?.name ?? undefined
+    }
+
     /** Thousands-separated, exactly as a token counter reads. */
     function exact(value) {
       return Number(value ?? 0).toLocaleString('en-US')
@@ -874,11 +853,18 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'sc-usage-dock' },
         h(
-          'button',
-          { type: 'button', className: 'sc-usage-line', onClick: () => setOpen((value) => !value) },
-          h('span', null, `${t('usageCacheHit')} ${percent}`),
-          h('span', { className: 'sc-usage-gap' }),
-          h('span', null, fill(t('usageTotalLine'), { value: formatTokens(total) })),
+          'div',
+          { className: 'sc-pills' },
+          h(
+            'button',
+            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
+            `${t('usageCacheHit')} ${percent}`,
+          ),
+          h(
+            'button',
+            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
+            fill(t('usageTotalLine'), { value: formatTokens(total) }),
+          ),
         ),
         open
           ? h(
@@ -1021,12 +1007,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const options = []
-      for (const provider of state.models?.providers ?? []) {
-        for (const model of state.models?.models?.[provider.id] ?? []) {
-          options.push(h('option', { key: `${provider.id}/${model.id}`, value: `${provider.id}/${model.id}` }, model.name))
-        }
-      }
       const route = discussion?.route
 
       return h(
@@ -1131,21 +1111,14 @@ window.__ModuleLoader__.load({
                   h(
                     'div',
                     { className: 'sc-tools-row' },
-                    options.length > 0
-                      ? h(
-                          'select',
-                          {
-                            className: 'sc-select',
-                            value: route ? `${route.provider}/${route.model}` : '',
-                            title: route ? fill(t('modelTitle'), { provider: route.provider, model: route.model }) : t('model'),
-                            onChange: (event) => {
-                              const [provider, ...rest] = String(event.target.value).split('/')
-                              switchModel({ provider, model: rest.join('/') })
-                            },
-                          },
-                          [h('option', { key: '__inherit', value: '' }, t('modelInherit')), ...options],
-                        )
-                      : h('span', { className: 'sc-label' }, route ? `${route.provider} · ${route.model}` : t('modelInherit')),
+                    h(
+                      'span',
+                      {
+                        className: 'sc-label',
+                        title: route ? fill(t('modelTitle'), { provider: route.provider, model: route.model }) : t('model'),
+                      },
+                      route ? (modelName(state.models, route) ?? route.model) : t('modelInherit'),
+                    ),
                   ),
                   h(
                     'div',
