@@ -564,6 +564,7 @@ await check('rejects a path outside the workspace and closes the turn', async ()
     text: '读一下工作区外面的文件',
   })
   const toolFrames = result.frames.filter((frame) => frame.type === 'tool')
+  assert.ok(llm.requests[before].messages.some((message) => message.role === 'tool' && message.toolCallId === 'call-1' && !message.isError), 'the previous read result remains in the next turn')
   assert.equal(toolFrames.at(-1).status, 'error')
   // Factual, professional, and it names the accessible range.
   assert.match(toolFrames.at(-1).text, /不在本次会话可访问的工作区内/)
@@ -633,6 +634,8 @@ await check('rejects a second concurrent send in one instance', async () => {
     second.frames.some((frame) => /正在生成回答/.test(frame.message ?? '')),
     `expected a busy refusal, got ${JSON.stringify(second.frames)}`,
   )
+  assert.ok(second.frames.every((frame) => frame.discussionId === globalThis.discussionId && frame.requestId === 'req-6'),
+    'HTTP-level refusal frames must carry the identity the client validates')
   await call('POST', '/side-chat/cancel', { discussionId: globalThis.discussionId, requestId: 'req-5' })
   await first.finished
 })

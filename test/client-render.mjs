@@ -84,6 +84,12 @@ globalThis.fetch = async (url, options = {}) => {
       { status: 200 },
     )
   }
+  if (url.endsWith('/send')) {
+    const identity = JSON.parse(options.body)
+    const frame = { discussionId: identity.discussionId, requestId: identity.requestId,
+      type: 'done', status: 'done', text: 'session-one-private-answer' }
+    return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
+  }
   return new Response(JSON.stringify({ ok: true }), { status: 200 })
 }
 
@@ -94,6 +100,8 @@ const registrations = []
 const tabTypes = []
 const dictionaries = {}
 const openedTabs = []
+const closedTabs = []
+const tabSignal = new AbortController().signal
 
 const ctx = {
   effect(callback) {
@@ -110,7 +118,6 @@ const ctx = {
   },
   sidebarRight: {
     openTab(kind) { openedTabs.push(kind) },
-    closeTab(kind) { openedTabs.push(`close:${kind}`) },
     registerCloseHandler(kind, handler) { this.closeHandler = { kind, handler }; return () => {} },
   },
   sidebarRightTabs: { register(definition) { tabTypes.push(definition); return () => {} } },
@@ -184,6 +191,8 @@ const translate = (key, values) => {
 }
 
 const failures = []
+const panelProps = { sessionId: 'session-1', t: translate,
+  hooks: { tabInfo: () => ({ tab: { signal: tabSignal, actions: { close: () => closedTabs.push('session-1-tab') } } }) } }
 async function check(label, fn) {
   try {
     await fn()
@@ -243,7 +252,7 @@ await check('the entry opens the tab and creates the instance', async () => {
 
 await check('the panel renders the prepared discussion', () => {
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
-  const tree = render(panel.component, { t: translate })
+  const tree = render(panel.component, panelProps)
   const text = textOf(tree)
   assert.match(text, /临时会话/)
   assert.match(text, /这是一个临时会话，关闭后会清除所有信息/)
@@ -251,10 +260,35 @@ await check('the panel renders the prepared discussion', () => {
   assert.ok(find(tree, (element) => element.props?.className === 'sc-input'), 'the composer input')
 })
 
-await check('closing is the tab chrome alone: no dialog, no close handler', () => {
-  assert.equal(ctx.sidebarRight.closeHandler, undefined, 'no close handler is registered')
+await check('another session tab cannot display or control the discussion transcript', async () => {
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
-  assert.equal(textOf(render(panel.component, { t: translate })).includes('关闭临时会话？'), false)
+  let tree = render(panel.component, panelProps)
+  find(tree, (element) => element.type === 'textarea').props.onChange({ target: { value: 'session-one-private-question' } })
+  tree = render(panel.component, panelProps)
+  find(tree, (element) => element.type === 'button' && element.props?.title === '发送').props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.match(textOf(render(panel.component, panelProps)), /session-one-private-question/)
+  const another = render(panel.component, { ...panelProps, sessionId: 'session-2' })
+  assert.equal(textOf(another).includes('session-one-private'), false)
+  assert.equal(find(another, (element) => element.type === 'textarea'), undefined)
+  assert.equal(ctx.sidebarRight.closeHandler.handler('session-2'), undefined)
+})
+
+await check('tab close asks first, cancel preserves the discussion, confirm clears it', async () => {
+  assert.ok(ctx.sidebarRight.closeHandler, 'the close handler is registered')
+  const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
+  assert.throws(() => ctx.sidebarRight.closeHandler.handler('session-1'), /关闭临时会话/)
+  let tree = render(panel.component, panelProps)
+  assert.match(textOf(tree), /本次会话历史不会保留/)
+  assert.equal(calls.some((call) => call.url.endsWith('/close')), false)
+  find(tree, (element) => element.type === 'button' && textOf(element) === '继续讨论').props.onClick()
+  assert.equal(textOf(render(panel.component, panelProps)).includes('关闭临时会话？'), false)
+  assert.throws(() => ctx.sidebarRight.closeHandler.handler('session-1'), /关闭临时会话/)
+  tree = render(panel.component, panelProps)
+  await find(tree, (element) => element.type === 'button' && textOf(element) === '关闭并清空').props.onClick()
+  assert.ok(calls.some((call) => call.url.endsWith('/close')), 'explicit confirmation closes the Host instance')
+  assert.deepEqual(closedTabs, ['session-1-tab'], 'uses the real session-bound tab.actions.close API')
+  assert.equal(ctx.sidebarRight.closeHandler.handler('session-1'), undefined, 'confirmed removal can proceed')
 })
 
 await check('every rendered copy key exists in the dictionary', () => {

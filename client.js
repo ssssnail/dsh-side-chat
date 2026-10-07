@@ -13,8 +13,8 @@
  *    renders.
  *
  * The host half carries the substance: a real in-memory Session (nothing
- * persisted), the main session's completed prefix as a seed, requests derived by
- * `session.deriveMessages()`, and read-only tools.
+ * persisted), the main session's completed prefix as a seed, requests composed from the fixed
+ * message snapshot, summary and recent turns, and read-only tools.
  *
  * Styles are copied from the harness's own modules (InputBar, MessageItem,
  * StatsPills, ReasoningRow) so this panel matches the main session visually.
@@ -196,6 +196,8 @@ window.__ModuleLoader__.load({
         models: null,
         pendingQuestion: null,
         tag: undefined,
+        requestId: null,
+        closeRequested: null,
       }
       const listeners = new Set()
       return {
@@ -436,6 +438,21 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ lifecycle */
 
     let openCounter = 0
+    let activeRequest = null
+
+    function requestClose(reopen = null) {
+      const state = store.get()
+      if (state.status === 'closed') return
+      store.set({ closeRequested: { discussionId: state.discussion?.discussionId, tag: state.tag, parentSessionId: state.parentSessionId, reopen } })
+    }
+
+    async function confirmClose(closeTab) {
+      const state = store.get()
+      const pending = state.closeRequested
+      if (!pending || pending.discussionId !== state.discussion?.discussionId || pending.tag !== state.tag || pending.parentSessionId !== state.parentSessionId) return
+      if (!await closeDiscussion({ keepTab: Boolean(pending.reopen), closeTab })) return
+      if (pending.reopen) await openDiscussion(pending.reopen.parentSessionId, pending.reopen.question)
+    }
 
     async function openDiscussion(parentSessionId, question) {
       const existing = store.get()
@@ -443,7 +460,10 @@ window.__ModuleLoader__.load({
         if (question) sendQuestion(question)
         return existing.discussion
       }
-      if (existing.discussion) await closeDiscussion({ keepTab: true })
+      if (existing.discussion) {
+        requestClose({ parentSessionId, question })
+        return undefined
+      }
       const tag = `panel-${++openCounter}-${Date.now()}`
       store.set({
         status: 'creating',
@@ -455,6 +475,8 @@ window.__ModuleLoader__.load({
         live: null,
         pendingQuestion: question ?? null,
         tag,
+        requestId: null,
+        closeRequested: null,
       })
       try {
         const result = await api('/open', { parentSessionId, tag })
@@ -480,18 +502,22 @@ window.__ModuleLoader__.load({
     }
 
     /** Read one turn's event stream into the transcript. */
-    async function streamTurn(body, answer) {
+    async function streamTurn(body, answer, signal) {
       const response = await fetch(`${ROUTE}/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
         body: JSON.stringify(body),
+        signal,
       })
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let completed = false
       const apply = (frame) => {
         const state = store.get()
+        if (frame.discussionId !== body.discussionId || frame.requestId !== body.requestId
+          || state.discussion?.discussionId !== body.discussionId || state.requestId !== body.requestId) return
         const live = state.live ?? answer
         if (frame.type === 'text') {
           live.text += frame.text ?? ''
@@ -515,6 +541,7 @@ window.__ModuleLoader__.load({
         } else if (frame.type === 'error') {
           live.error = frame.message
         } else if (frame.type === 'done') {
+          completed = true
           live.status = frame.status === 'stopped' ? 'stopped' : frame.status === 'error' ? 'error' : 'done'
           live.text = live.text || frame.text || ''
           live.stats = frame.stats ?? null
@@ -524,27 +551,34 @@ window.__ModuleLoader__.load({
         }
         store.set({ live: { ...live } })
       }
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let boundary
-        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
-          const chunk = buffer.slice(0, boundary)
-          buffer = buffer.slice(boundary + 2)
-          const line = chunk.split('\n').find((row) => row.startsWith('data: '))
-          if (!line) continue
-          const payload = line.slice(6)
-          if (payload === '[DONE]') {
-            buffer = ''
-            break
-          }
-          try {
-            apply(JSON.parse(payload))
-          } catch {
-            /* a partial frame is not an event */
+      try {
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let boundary
+          while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+            const chunk = buffer.slice(0, boundary)
+            buffer = buffer.slice(boundary + 2)
+            const line = chunk.split('\n').find((row) => row.startsWith('data: '))
+            if (!line) continue
+            const payload = line.slice(6)
+            if (payload === '[DONE]') {
+              if (!completed) throw new Error('讨论连接提前结束，未收到完成状态。')
+              return
+            }
+            let frame
+            try {
+              frame = JSON.parse(payload)
+            } catch {
+              continue
+            }
+            apply(frame)
           }
         }
+        if (!completed && !signal?.aborted) throw new Error('讨论连接提前结束，未收到完成状态。')
+      } finally {
+        reader.releaseLock()
       }
     }
 
@@ -556,16 +590,23 @@ window.__ModuleLoader__.load({
       }
       if (state.status !== 'idle' || !state.discussion) return
       const requestId = newId('req')
+      const discussionId = state.discussion.discussionId
+      const request = { discussionId, requestId, controller: new AbortController() }
+      activeRequest = request
+      const ownsRequest = () => store.get().discussion?.discussionId === discussionId && store.get().requestId === requestId
       const answer = emptyAnswer()
       const messages = [...state.messages, { id: newId('q'), role: 'user', text: question }]
-      store.set({ status: 'generating', notice: null, messages, live: answer })
+      store.set({ status: 'generating', requestId, notice: null, messages, live: answer })
       try {
-        await streamTurn({ discussionId: state.discussion.discussionId, requestId, text: question }, answer)
+        await streamTurn({ discussionId, requestId, text: question }, answer, request.controller.signal)
       } catch (error) {
-        reportFailure('send', error)
-        answer.status = 'error'
-        answer.error = String(error?.message ?? error)
+        if (ownsRequest()) {
+          reportFailure('send', error)
+          store.set({ live: { ...(store.get().live ?? answer), status: 'error', error: String(error?.message ?? error) } })
+        }
       } finally {
+        if (activeRequest === request) activeRequest = null
+        if (!ownsRequest()) return
         const settled = store.get().live ?? answer
         const finalMessages = [...store.get().messages]
         if (settled.text || settled.reasoning || settled.tools?.length > 0 || settled.error || settled.notice) {
@@ -574,6 +615,7 @@ window.__ModuleLoader__.load({
         store.set((current) => ({
           status: current.status === 'closed' ? 'closed' : 'idle',
           live: null,
+          requestId: null,
           messages: finalMessages,
         }))
       }
@@ -584,10 +626,12 @@ window.__ModuleLoader__.load({
       if (state.status !== 'generating' || !state.discussion) return
       store.set({ status: 'stopping' })
       try {
-        await api('/cancel', { discussionId: state.discussion.discussionId })
+        await api('/cancel', { discussionId: state.discussion.discussionId, requestId: state.requestId })
       } catch (error) {
         reportFailure('cancel', error)
-        store.set({ status: 'idle' })
+        if (store.get().discussion?.discussionId === state.discussion.discussionId && store.get().requestId === state.requestId) {
+          activeRequest?.controller.abort()
+        }
       }
     }
 
@@ -602,24 +646,31 @@ window.__ModuleLoader__.load({
 
     async function closeDiscussion(options = {}) {
       const state = store.get()
+      const closeGeneration = ++openCounter
+      // Invalidate identity before aborting, so delayed callbacks cannot revive it.
+      store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null, notice: null,
+        tag: undefined, pendingQuestion: null, requestId: null, closeRequested: null })
+      const request = activeRequest
+      activeRequest = null
+      request?.controller.abort()
       if (state.discussion) {
         const discussionId = state.discussion.discussionId
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null, notice: null })
         try {
           await api('/close', { discussionId })
         } catch {
           /* the instance is gone either way */
         }
-      } else {
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null })
       }
-      if (options.keepTab !== true && sidebar) {
+      if (openCounter !== closeGeneration) return false
+      if (options.keepTab !== true && options.closeTab) {
         try {
-          sidebar.closeTab?.(TAB_KIND)
+          // The tab's bound action retains its session even after navigation.
+          options.closeTab()
         } catch (error) {
           reportFailure('closeTab', error)
         }
       }
+      return true
     }
 
     /** The catalogue's display name for a route, when it is known. */
@@ -630,6 +681,9 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 .sc-root{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);position:relative}
+.sc-confirm{position:absolute;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--dsw-alias-bg-base)}
+.sc-confirm-card{width:100%;max-width:360px;padding:20px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);line-height:22px}
+.sc-confirm-card p{margin:12px 0}
 .sc-grow{flex:1 1 auto;min-width:0}
 .sc-head{display:flex;flex-direction:column;gap:3px;padding:10px 12px 8px;border-bottom:.5px solid var(--dsw-alias-border-l1);flex:none}
 .sc-head-row{display:flex;align-items:center;gap:8px;min-width:0}
@@ -921,10 +975,18 @@ window.__ModuleLoader__.load({
     /** The panel: header facts, transcript, composer, close confirmation. */
     function DiscussionPanel(props) {
       const t = makeT(props.t)
-      const state = useStoreState()
+      const sharedState = useStoreState()
       const [draft, setDraft] = useState('')
       const [notice, setNotice] = useState(null)
       const scrollRef = useRef(null)
+      const tabInfo = props.hooks?.tabInfo?.()
+      const tabSignal = tabInfo?.tab.signal
+      const ownerSessionId = props.sessionId ?? sharedState.parentSessionId
+      const ownsDiscussion = ownerSessionId === sharedState.parentSessionId
+      // A previously opened tab must never expose another session's transcript.
+      const state = ownsDiscussion ? sharedState : { ...sharedState, status: 'closed', discussion: null,
+        messages: [], live: null, lastStats: null, openError: null, notice: null,
+        closeRequested: sharedState.closeRequested?.reopen?.parentSessionId === ownerSessionId ? sharedState.closeRequested : null }
 
       const busy = state.status === 'generating' || state.status === 'stopping'
       const discussion = state.discussion
@@ -940,15 +1002,17 @@ window.__ModuleLoader__.load({
         loadModels()
       }, [])
 
-      // Closing the tab unmounts this body: that is the close, and the instance
-      // must not outlive it.
-      useEffect(
-        () => () => {
-          const current = store.get()
-          if (current.discussion) closeDiscussion({ keepTab: true })
-        },
-        [],
-      )
+      // Hiding/unmounting a body is not an explicit close. The tab lifetime
+      // signal also covers removal paths that bypass the chrome handler.
+      useEffect(() => {
+        if (!tabSignal) return undefined
+        const dispose = () => {
+          if (store.get().status !== 'closed' && store.get().parentSessionId === ownerSessionId) closeDiscussion({ keepTab: true })
+        }
+        if (tabSignal.aborted) dispose()
+        else tabSignal.addEventListener('abort', dispose, { once: true })
+        return () => tabSignal.removeEventListener('abort', dispose)
+      }, [tabSignal, ownerSessionId])
 
       const notify = useCallback((message) => {
         setNotice(message)
@@ -976,6 +1040,17 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'sc-root' },
         h('style', null, CSS),
+        state.closeRequested ? h('div', { className: 'sc-confirm' },
+          h('div', { className: 'sc-confirm-card', role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'sc-close-title' },
+            h('strong', { id: 'sc-close-title' }, t('closeTitle')),
+            h('p', null, t('closeBody')),
+            busy ? h('p', null, t('closeBusy')) : null,
+            h('div', { className: 'sc-answer-actions' },
+              h('button', { type: 'button', className: 'sc-btn', autoFocus: true, onClick: () => store.set({ closeRequested: null }) }, t('keepDiscussing')),
+              h('button', { type: 'button', className: 'sc-btn', onClick: () => confirmClose(tabInfo?.tab.actions.close) }, t('closeAndClear')),
+            ),
+          ),
+        ) : null,
         state.openError && state.status !== 'error' ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.openError) : null,
         !discussion && state.status === 'creating'
           ? h(
@@ -1198,6 +1273,13 @@ window.__ModuleLoader__.load({
       // A close from the tab chrome must ask first: the sidebar documents that a
       // FAILING close handler preserves the tab, so the unconfirmed path throws
       // and the confirm renders in the still-mounted panel.
+      ctx.effect(() => ctx.sidebarRight.registerCloseHandler(TAB_KIND, (sessionId) => {
+        const state = store.get()
+        if (state.status === 'closed' || state.parentSessionId !== sessionId) return
+        requestClose()
+        throw new Error(copy(ctx, 'closeTitle'))
+      }), 'side-chat:close-confirm')
+      ctx.effect(() => () => closeDiscussion({ keepTab: true }), 'side-chat:teardown')
     }
 
     return { inject, apply }

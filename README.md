@@ -6,10 +6,12 @@ DSH Web 的插件：在主会话旁边开一个**只读的临时会话**。围�
 
 - 侧栏输入框左侧的按钮打开一个右侧标签「临时会话」。
 - 打开时做主会话的**快照**：取最后一次 `turn/end` 作为边界，边界之后的未完成轮次全部排除（不让对方看到半截工作）。
-- 讨论在**内存里**是一个真 Session（继承主会话前缀），请求由 `session.deriveMessages()` 派生 —— 因此继承的那段请求前缀可以被模型服务缓存复用。
+- 讨论保留一个**内存 Session**记录事件和用量；模型请求统一使用打开时派生的消息快照、讨论摘要及近期回合。Session 的 seed 从原日志序号 0 开始，预算裁剪和压缩作用于实际请求，不改动主会话。未改变的消息前缀可供模型服务复用缓存，具体命中仍取决于模型和请求配置。
 - 只读工具 `read` / `glob` / `grep`，工作区受限（realpath 校验 + 沙箱），出界与未开放的工具会被**礼貌拒绝并结束本轮**，不会反复尝试。
-- 回答逐字流式；每轮带用量胶囊（缓存命中率、输入/输出、首字与总耗时，可点开明细）。可切换模型、把回答放进主会话草稿、随时停止。
-- 关闭需要确认；关闭后讨论实例被销毁，磁盘上不留任何东西。
+- 回答逐字流式；每轮带用量胶囊（缓存命中率、输入/输出、首字与总耗时，可点开明细）。默认继承主会话模型，可把回答放进主会话草稿、随时停止。
+- 标签关闭前显示二次确认；取消保留讨论，确认后中断请求并清空。关闭期间迟到的创建响应和旧流不能恢复面板或写入新实例。隐藏面板不等于关闭，标签生命周期结束或插件停用时也会清理。
+
+当前 UI 尚未接入 `/` 命令、模型切换菜单和压缩按钮；`/side-chat/model` 与 `/side-chat/compact` 是宿主 API，不是输入框中的 slash 命令。
 
 ## 架构
 
@@ -38,22 +40,36 @@ DSH Web 的插件：在主会话旁边开一个**只读的临时会话**。围�
 - **不落盘**：会话通过 `ctx.sessions.prepare/enter/announce` 在内存建立，不走 `agentLoop`；`~/.dsh/sessions` 下不会出现讨论会话文件（已实测）。
 - **不写工作区**：只暴露三个只读工具，且路径经 realpath 校验限制在绑定工作区。
 - **不干扰主任务**：`ctx.llm.stream` 不带 `sessionId` 调用，绕过检查点策略与标题生成等会话级监听器；讨论的模型路由是独立的。
-- **边界干净**：快照在最后一个 `turn/end` 处切开，未完成轮次与半截工具调用不进入讨论。
+- **边界干净**：快照在最后一个 `turn/end` 处切开，未完成轮次与半截工具调用不进入讨论；尚无完整回合时继承内容为空。
+- **搜索可中断**：`grep` 正则、`glob` 通配符和 `grep.include` 过滤在独立 Worker 中匹配，单批匹配最多 1 秒，支持取消；不会把正则回溯放到 Host 主线程。
+- **压缩一致**：压缩与发送互斥，关闭会取消正在压缩的请求；摘要替代较早讨论并进入下一次模型请求。
 
 ## 安装
+
+这是可直接安装的 DSH Web bundle：包含 Host、Client 和配置 patch，无需单独构建。当前已用 DSH `0.2.0-rc.2` 的真实安装器在独立临时 profile 中验证打包安装、bundle 启用、入口解析与包内搜索 Worker。该检查不等于真实模型或完整浏览器验收。
+
+从本地目录安装：
+
+```bash
+dsh plugin --profile web add link:/Users/snail/projects/side-chat --registry=https://registry.npmjs.org/
+```
+
+也可在 DSH 会话中调用安装工具：
 
 ```bash
 # 在本机 DSH 会话里（注意 registry：该 profile 里 agent-live 的 pin 在 npmmirror 上不存在）
 plugin_manager install_bundle  target=link:/Users/snail/projects/side-chat  registry=https://registry.npmjs.org/
 ```
 
+`private: true` 只阻止误发布到 npm；不妨碍本地目录、Git 仓库或 `.tgz` 安装。目前没有发布到 npm，不能通过包名从 npm 下载。
+
 装好后**刷新页面**。宿主侧改动需要重启 `dsh web`（Node 缓存 ESM：模块世代是进程启动时加载的，`/side-chat/ping` 的 `revision` 字段用来自查）。
 
 ## 测试
 
 ```bash
-npm test                 # 宿主 14 项 + 客户端 6 项（全离线）
-node test/real-fs.mjs    # 真实文件系统 13 项：沙箱边界、越界符号链接、spill 临时路径
+npm test                 # 宿主、客户端及生命周期/搜索回归检查（全离线）
+npm run test:real        # 真实文件系统 + 已安装 dsh 的真实 SessionStore；不调用模型
 npm run test:live        # 真实模型调用：快照、seed、流式、用量、关闭
 SIDE_CHAT_TOOL=1 npm run test:live   # 强制走只读 read 工具
 ```

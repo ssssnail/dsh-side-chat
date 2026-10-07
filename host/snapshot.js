@@ -40,7 +40,7 @@ export async function captureSnapshot(ctx, parentSessionId, log = () => {}) {
     }
   }
 
-  const events = session.ownEvents()
+  const events = session.snapshotEvents?.() ?? session.ownEvents()
   let boundarySeq = -1
   let boundaryTime = 0
   let completedTurns = 0
@@ -56,7 +56,7 @@ export async function captureSnapshot(ctx, parentSessionId, log = () => {}) {
   let excludedInflight = false
   for (const seq of nodes) {
     if (entries.length >= MAX_SNAPSHOT_MESSAGES) break
-    if (boundarySeq >= 0 && seq > boundarySeq) {
+    if (boundarySeq < 0 || seq > boundarySeq) {
       excludedInflight = true
       continue
     }
@@ -115,6 +115,7 @@ export async function captureSnapshot(ctx, parentSessionId, log = () => {}) {
  * @returns {{provider?: string, model?: string, reasoningEffort?: string}} route.
  */
 export function selectRoute(ctx, session) {
+  let selected
   try {
     const events = session.ownEvents?.() ?? []
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -122,12 +123,7 @@ export function selectRoute(ctx, session) {
       if (event?.type !== 'model/selection') continue
       const selection = event.data
       if (selection?.provider && selection?.model) {
-        if (selection.reasoningEffort) {
-          return { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
-        }
-        // The model selector sets provider/model but not the reasoning effort;
-        // fall through so the effort is inherited from the logged header or the
-        // configured default rather than silently dropped.
+        selected = selection
         break
       }
       break
@@ -142,6 +138,15 @@ export function selectRoute(ctx, session) {
   } catch {
     config = undefined
   }
+  const fallback = ctx.get('agentDefaultModel')?.currentSelection?.()
+  if (selected) {
+    // Never carry another model's route-specific effort across a model switch.
+    const sameRoute = (value) => value?.provider === selected.provider && value?.model === selected.model
+    const effort = selected.reasoningEffort
+      ?? (sameRoute(config) ? config.reasoningEffort : undefined)
+      ?? (sameRoute(fallback) ? fallback.reasoningEffort : undefined)
+    return { provider: selected.provider, model: selected.model, ...(effort ? { reasoningEffort: effort } : {}) }
+  }
   if (config?.provider && config?.model) {
     return {
       provider: config.provider,
@@ -149,7 +154,6 @@ export function selectRoute(ctx, session) {
       ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
     }
   }
-  const fallback = ctx.get('agentDefaultModel')?.currentSelection?.()
   if (fallback?.provider && fallback?.model) {
     return {
       provider: fallback.provider,

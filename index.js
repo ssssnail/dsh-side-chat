@@ -5,7 +5,7 @@
  *  - own the process-local discussion runtime (memory only);
  *  - expose it to the plugin's own Client half over one plugin-owned HTTP
  *    route family (`/side-chat/*`) on the loopback web server;
- *  - never create a Session, never write a session log, never call a tool.
+ *  - never create an Agent or a persistent session log; tools stay read-only.
  *
  * Transport note: an installed bundle's Client half cannot reach a
  * runtime-registered Remote namespace (the application's Remote capability set
@@ -30,7 +30,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000
  * process keeps the JavaScript generation it loaded, so this is how a live
  * profile confirms whether an edit took effect without a restart.
  */
-const PLUGIN_REVISION = 4
+const PLUGIN_REVISION = 6
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - host context.
@@ -142,8 +142,9 @@ export function apply(ctx) {
             )
           } catch (error) {
             if (!closedByClient) {
-              stream.send({ type: 'error', message: String(error?.message ?? error), code: error?.code })
-              stream.send({ type: 'done', status: 'error', text: '' })
+              const identity = { discussionId: body.discussionId, requestId: body.requestId }
+              stream.send({ ...identity, type: 'error', message: String(error?.message ?? error), code: error?.code })
+              stream.send({ ...identity, type: 'done', status: 'error', text: '' })
             }
           }
           stream.end()

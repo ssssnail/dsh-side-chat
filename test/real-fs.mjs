@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 const HARNESS = process.env.DSH_HARNESS_DIR
   ?? '/Users/snail/.local/share/pi-node/node-v22.23.2-darwin-x64/lib/node_modules/@deepseek-ai/dsh'
@@ -20,7 +21,7 @@ const { Context } = require('@deepseek-ai/cordis')
 
 const { createReadOnlyToolbox } = await import('../host/readonly-tools.js')
 
-const workspace = '/Users/snail/projects/side-chat'
+const workspace = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
 
 const root = new Context()
 // schemastery normally applies these defaults; construct with them explicitly.

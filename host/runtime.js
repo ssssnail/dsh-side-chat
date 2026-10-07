@@ -5,8 +5,8 @@
  * the inherited snapshot prefix, the discussion-only instruction, the turns
  * produced so far, the per-request cancellation handles, and the request
  * statistics. Closing a discussion aborts its request, drops the record, and
- * leaves nothing behind — no Session is created, no session log is written, no
- * file is touched.
+ * leaves nothing behind — its memory Session is detached, no session log
+ * writer is attached, and no file is touched.
  *
  * The model call goes straight to `ctx.llm.stream` WITHOUT a `sessionId`. That
  * one omission is deliberate: the harness's session-scoped `llm/stream`
@@ -72,24 +72,25 @@ export function createDiscussionRuntime(ctx, options = {}) {
     })
     const instructionMessage = message('developer', instruction, { kind: 'side-chat' })
 
-    // The discussion is a real Session so the harness's own Conversation, chat
-    // and usage components can render it. It is created OUTSIDE the agent
+    // The discussion has a real memory Session for event and usage records.
+    // It is created OUTSIDE the agent
     // lifecycle (prepare + enter + announce), which the session store documents
     // as persisting nothing: no log writer is ever attached. `detach` removes it
     // from the store again, so closing the discussion destroys it.
-    const sessionId = `discussion-${randomUUID()}`
+    let sessionId = `discussion-${randomUUID()}`
     let session
     let detachSession
     let seededTurnNumber = 0
     try {
       const parent = ctx.get('sessions')?.get(parentSessionId)
       seededTurnNumber = seededTurn(parent, snapshot.boundarySeq)
-      const from = snapshot.firstKeptSeq ?? 0
       const to = (snapshot.boundarySeq ?? -1) + 1
-      const seed = parent && to > from ? [...parent.snapshotEvents(from, to)] : []
+      // Session seeds must retain contiguous original seqs and all references.
+      // Budget trimming affects the request messages, never the event log.
+      const seed = parent && to > 0 ? [...parent.snapshotEvents(0, to)] : []
       const prepared = ctx.sessions.prepare(sessionId, {
-        ...(seed.length > 0 ? { seed } : {}),
-        ...(seed.length > 0 ? { inheritedEventCount: seed.length } : {}),
+        seed,
+        inheritedEventCount: seed.length,
         meta: {
           ...(snapshot.cwd ? { cwd: snapshot.cwd } : {}),
           parentSession: parentSessionId,
@@ -104,8 +105,10 @@ export function createDiscussionRuntime(ctx, options = {}) {
       // Without a Session the discussion still runs over its own event stream;
       // only the reused chat components are unavailable.
       log({ stage: 'session-failed', error: String(error?.message ?? error) })
+      detachSession?.()
       session = undefined
       detachSession = undefined
+      sessionId = undefined
     }
 
     const discussion = {
@@ -245,7 +248,9 @@ export function createDiscussionRuntime(ctx, options = {}) {
     const discussion = require(input.discussionId)
     const requestId = String(input.requestId ?? '')
     /** Every streamed event names its instance and request before anything else. */
-    const emit = (event) => sink({ discussionId: discussion.id, requestId, ...event })
+    const emit = (event) => {
+      if (!discussion.closed) sink({ discussionId: discussion.id, requestId, ...event })
+    }
     const text = String(input.text ?? '').trim()
     if (!requestId) throw new Error('缺少 requestId。')
     if (!text) throw new Error('讨论问题为空。')
@@ -377,10 +382,9 @@ export function createDiscussionRuntime(ctx, options = {}) {
         const request = {
           provider: route.provider,
           model: route.model,
-          // With a Session the request is derived from its own log — the seeded
-          // inherited prefix, the discussion instruction and this turn's events
-          // — which is what keeps the main session's request prefix reusable.
-          messages: session ? session.deriveMessages() : [...messages],
+          // One request-history authority, including snapshot budget trimming
+          // and compaction. The memory Session is only the event/usage record.
+          messages: [...messages],
           signal: controller.signal,
         }
         if (route.reasoningEffort) request.reasoningEffort = route.reasoningEffort
@@ -546,6 +550,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
             ...(result.isError ? { isError: true } : {}),
           }
           messages.push(toolResult)
+          turn.answerMessages.push(toolResult)
           unresolved = unresolved.filter((id) => id !== call.id)
           if (session) {
             appendSafe(
@@ -711,13 +716,16 @@ export function createDiscussionRuntime(ctx, options = {}) {
 
     const older = turns.slice(0, turns.length - COMPACT_KEEP_TURNS)
     const keep = turns.slice(turns.length - COMPACT_KEEP_TURNS)
-    const route = discussion.route
+    const route = { ...discussion.route }
     if (!route.provider || !route.model) return { ok: false, message: '没有可用模型进行压缩。' }
 
-    const transcript = older
-      .map((turn) => `【讨论问题】\n${turn.question}\n\n【讨论回答】\n${turn.text}`)
-      .join('\n\n---\n\n')
+    const transcript = [
+      ...discussion.summary.map((entry) => entry.content.map((block) => block.text ?? '').join('')),
+      ...older.map((turn) => `【讨论问题】\n${turn.question}\n\n【讨论回答】\n${turn.text}`),
+    ].join('\n\n---\n\n')
     const controller = new AbortController()
+    const operation = { requestId: `compact-${randomUUID()}`, controller }
+    discussion.busy = operation
     let summary = ''
     try {
       const stream = ctx.llm.stream({
@@ -741,16 +749,22 @@ export function createDiscussionRuntime(ctx, options = {}) {
         signal: controller.signal,
       })
       for await (const chunk of stream) {
+        if (controller.signal.aborted || discussion.closed) throw cancelReason('instance-closed')
         if (chunk.type === 'text-delta') summary += chunk.text
+        if (chunk.type === 'finish' && chunk.reason?.kind === 'error') throw new Error(chunk.reason.failure?.message ?? '模型请求失败。')
+        if (chunk.type === 'finish' && chunk.reason?.kind === 'aborted') throw cancelReason('user-stop')
       }
     } catch (error) {
       return { ok: false, message: `压缩失败：${error?.message ?? error}` }
+    } finally {
+      if (discussion.busy === operation) discussion.busy = null
     }
+    if (controller.signal.aborted || discussion.closed) return { ok: false, message: '讨论实例已关闭或压缩已停止。' }
     if (!summary.trim()) return { ok: false, message: '压缩没有产生摘要。' }
 
-    discussion.summary.push(
+    discussion.summary = [
       message('developer', `【较早的临时讨论摘要（已压缩）】\n${summary.trim()}`, { kind: 'side-chat' }),
-    )
+    ]
     discussion.turns = keep
     log({ stage: 'compact', discussionId, compressedTurns: older.length, keptTurns: keep.length })
     return { ok: true, compacted: true, compressedTurns: older.length, keptTurns: keep.length }
@@ -851,7 +865,7 @@ function createLiveAttempt(ctx, session, turn, step, discussion, log) {
 function seededTurn(parent, boundarySeq) {
   if (!parent || boundarySeq === undefined) return 0
   let turn = 0
-  for (const event of parent.ownEvents?.() ?? []) {
+  for (const event of parent.snapshotEvents?.() ?? parent.ownEvents?.() ?? []) {
     if (event.seq > boundarySeq) break
     const value = event.data?.turn
     if (typeof value === 'number' && value > turn) turn = value
@@ -940,6 +954,7 @@ function collectText(answerMessages, parts) {
   if (fromParts.trim()) return fromParts
   const blocks = []
   for (const answer of answerMessages) {
+    if (answer.role !== 'assistant') continue
     for (const block of answer.content ?? []) {
       if (block?.type === 'text' && block.text) blocks.push(block.text)
     }

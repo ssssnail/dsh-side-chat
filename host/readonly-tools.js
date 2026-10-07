@@ -14,6 +14,8 @@
  *     followed.
  */
 
+import { createGrepMatcher, createGlobMatcher } from './grep-matcher.js'
+
 /** Declared tool names. Anything not in this set is refused before dispatch. */
 export const READ_ONLY_TOOL_NAMES = Object.freeze(['read', 'glob', 'grep'])
 
@@ -202,20 +204,29 @@ export async function createReadOnlyToolbox(ctx, workspacePath) {
     async glob(args, signal) {
       const pattern = String(args?.pattern ?? '').trim()
       if (!pattern) throw new ReadOnlyToolError('glob 需要 pattern 参数。')
-      const match = compileGlob(pattern)
       const base = await inside(args?.path, signal)
       const info = await fs.stat(base, signal)
       if (!info) throw new ReadOnlyToolError(`目录不存在：${base.displayPath}`)
       const found = []
-      if (info.type === 'file') {
-        if (match(relativeTo(root, base))) found.push(base.displayPath)
-      } else {
-        for await (const file of walk(base, signal)) {
-          if (match(relativeTo(root, file.target))) {
-            found.push(file.target.displayPath)
+      const matcher = createGlobMatcher(pattern, signal)
+      const batch = []
+      const collect = async () => {
+        const indices = await matcher.match(batch.map((file) => relativeTo(root, file)), GLOB_RESULTS - found.length)
+        for (const index of indices) found.push(batch[index].displayPath)
+        batch.length = 0
+      }
+      try {
+        if (info.type === 'file') batch.push(base)
+        else {
+          for await (const file of walk(base, signal)) {
+            batch.push(file.target)
+            if (batch.length >= 64) await collect()
             if (found.length >= GLOB_RESULTS) break
           }
         }
+        if (batch.length) await collect()
+      } finally {
+        await matcher.dispose()
       }
       if (found.length === 0) return '没有匹配的文件。'
       const capped = found.length >= GLOB_RESULTS ? `\n\n（结果已达上限 ${GLOB_RESULTS} 条）` : ''
@@ -225,13 +236,6 @@ export async function createReadOnlyToolbox(ctx, workspacePath) {
     async grep(args, signal) {
       const source = String(args?.pattern ?? '')
       if (!source) throw new ReadOnlyToolError('grep 需要 pattern 参数。')
-      let regex
-      try {
-        regex = new RegExp(source, 'g')
-      } catch (error) {
-        throw new ReadOnlyToolError(`正则表达式无效：${error?.message ?? error}`)
-      }
-      const include = args?.include ? compileGlob(String(args.include)) : undefined
       const base = await inside(args?.path, signal)
       const info = await fs.stat(base, signal)
       if (!info) throw new ReadOnlyToolError(`路径不存在：${base.displayPath}`)
@@ -243,31 +247,37 @@ export async function createReadOnlyToolbox(ctx, workspacePath) {
       const groups = []
       let matches = 0
       let scanned = 0
-      for (const file of files) {
-        if (signal?.aborted) break
-        if (matches >= GREP_RESULTS || scanned > MAX_SCAN_BYTES) break
-        const relative = relativeTo(root, file)
-        if (include && !include(relative)) continue
-        let text
-        try {
-          const stat = await fs.stat(file, signal)
-          if (!stat || stat.type !== 'file') continue
-          if (typeof stat.size === 'number' && stat.size > MAX_READ_BYTES) continue
-          text = await fs.readText(file, signal)
-        } catch {
-          continue
+      const matcher = createGrepMatcher(source, signal)
+      let includeMatcher
+      try {
+        let candidates = files
+        if (args?.include) {
+          includeMatcher = createGlobMatcher(String(args.include), signal)
+          const indices = await includeMatcher.match(files.map((file) => relativeTo(root, file)), files.length)
+          candidates = indices.map((index) => files[index])
         }
-        scanned += text.length
-        if (looksBinary(text)) continue
-        const hits = []
-        const lines = text.split(/\r?\n/)
-        for (let index = 0; index < lines.length && matches < GREP_RESULTS; index += 1) {
-          regex.lastIndex = 0
-          if (!regex.test(lines[index])) continue
-          matches += 1
-          hits.push(`${index + 1}:${lines[index]}`)
+        for (const file of candidates) {
+          if (signal?.aborted) break
+          if (matches >= GREP_RESULTS || scanned > MAX_SCAN_BYTES) break
+          const relative = relativeTo(root, file)
+          let text
+          try {
+            const stat = await fs.stat(file, signal)
+            if (!stat || stat.type !== 'file') continue
+            if (typeof stat.size === 'number' && stat.size > MAX_READ_BYTES) continue
+            text = await fs.readText(file, signal)
+          } catch {
+            continue
+          }
+          scanned += text.length
+          if (looksBinary(text)) continue
+          const hits = await matcher.match(text, GREP_RESULTS - matches)
+          matches += hits.length
+          if (hits.length > 0) groups.push(`${relative}\n${hits.join('\n')}`)
         }
-        if (hits.length > 0) groups.push(`${relative}\n${hits.join('\n')}`)
+      } finally {
+        await includeMatcher?.dispose()
+        await matcher.dispose()
       }
       if (groups.length === 0) return '没有匹配。'
       const capped = matches >= GREP_RESULTS ? `\n\n（匹配数已达上限 ${GREP_RESULTS} 条）` : ''
@@ -347,56 +357,4 @@ function relativeTo(root, target) {
     return rest.startsWith('/') ? rest.slice(1) : rest
   }
   return display
-}
-
-/**
- * Compile one glob to a predicate. Supports `**`, `*`, `?` and `{a,b}`; a
- * pattern without `/` is matched against the basename at any depth.
- */
-function compileGlob(pattern) {
-  const normalized = pattern.replaceAll('\\', '/')
-  const anchored = normalized.includes('/')
-  const regex = new RegExp(`^${globToRegExpSource(normalized)}$`)
-  return (relativePath) => {
-    const candidate = relativePath.replaceAll('\\', '/')
-    if (anchored) return regex.test(candidate)
-    const base = candidate.slice(candidate.lastIndexOf('/') + 1)
-    return regex.test(base) || regex.test(candidate)
-  }
-}
-
-function globToRegExpSource(pattern) {
-  let out = ''
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index]
-    if (char === '*') {
-      if (pattern[index + 1] === '*') {
-        index += 1
-        if (pattern[index + 1] === '/') {
-          index += 1
-          out += '(?:.*/)?'
-        } else {
-          out += '.*'
-        }
-      } else {
-        out += '[^/]*'
-      }
-      continue
-    }
-    if (char === '?') {
-      out += '[^/]'
-      continue
-    }
-    if (char === '{') {
-      const close = pattern.indexOf('}', index)
-      if (close > index) {
-        const alternatives = pattern.slice(index + 1, close).split(',')
-        out += `(?:${alternatives.map((part) => globToRegExpSource(part)).join('|')})`
-        index = close
-        continue
-      }
-    }
-    out += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-  return out
 }
