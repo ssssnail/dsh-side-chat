@@ -104,7 +104,8 @@ window.__ModuleLoader__.load({
       usageOutput: '输出',
       usageCacheRead: '缓存命中',
       usageCacheWrite: '缓存写入',
-      usageCacheHit: '缓存命中率',
+      usageCacheHit: '缓存命中',
+      usageCacheHitRate: '缓存命中率',
       usageTitle: 'Token 用量',
       usageUncachedInput: '未缓存输入',
       usageCacheReadLabel: '缓存读取',
@@ -462,7 +463,7 @@ window.__ModuleLoader__.load({
           api('/close', { discussionId: result.discussion.discussionId }).catch(() => {})
           return undefined
         }
-        store.set({ status: 'idle', discussion: result.discussion, tag: undefined })
+        store.set({ status: 'idle', discussion: result.discussion, tag: undefined, lastStats: null })
         loadModels()
         const pending = store.get().pendingQuestion
         if (pending) {
@@ -518,7 +519,7 @@ window.__ModuleLoader__.load({
           live.text = live.text || frame.text || ''
           live.stats = frame.stats ?? null
           live.streaming = false
-          store.set({ live: { ...live } })
+          store.set({ live: { ...live }, lastStats: frame.type === 'done' ? frame.stats ?? null : store.get().lastStats })
           return
         }
         store.set({ live: { ...live } })
@@ -603,14 +604,14 @@ window.__ModuleLoader__.load({
       const state = store.get()
       if (state.discussion) {
         const discussionId = state.discussion.discussionId
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, notice: null })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null, notice: null })
         try {
           await api('/close', { discussionId })
         } catch {
           /* the instance is gone either way */
         }
       } else {
-        store.set({ status: 'closed', discussion: null, messages: [], live: null })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null })
       }
       if (options.keepTab !== true && sidebar) {
         try {
@@ -769,6 +770,40 @@ window.__ModuleLoader__.load({
           ),
         ),
       )
+    }
+
+    /** The one-line session stats that fill the composer's reserved height. */
+    function UsageLine({ t, messages, lastStats }) {
+      const compact = (value) => {
+        const n = Number(value ?? 0)
+        if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B`
+        if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`
+        if (n >= 1_000) return `${Math.round(n / 1_000)}k`
+        return String(Math.round(n))
+      }
+      const turns = messages.filter((message) => message.role === 'assistant').length
+      let input = 0
+      let output = 0
+      let cacheRead = 0
+      let cacheWrite = 0
+      for (const message of messages) {
+        const stats = message.stats
+        if (!stats) continue
+        input += Number(stats.inputTokens ?? 0)
+        output += Number(stats.outputTokens ?? 0)
+        cacheRead += Number(stats.cacheReadTokens ?? 0)
+        cacheWrite += Number(stats.cacheWriteTokens ?? 0)
+      }
+      const total = input + output + cacheRead + cacheWrite
+      const billed = input + cacheRead + cacheWrite
+      const percent = billed > 0 ? Math.round((cacheRead / billed) * 100) : 0
+      const tokPerSec = lastStats && Number(lastStats.totalMs) > 0 ? Math.round(output / (Number(lastStats.totalMs) / 1000)) : 0
+      const parts = []
+      if (turns > 0) parts.push(`${turns} 轮`)
+      if (total > 0) parts.push(`${compact(total)} tok`)
+      if (tokPerSec > 0) parts.push(`${tokPerSec} tok/s`)
+      if (lastStats) parts.push(`${t('usageCacheHit')} ${percent}%`)
+      return parts.length > 0 ? h('div', { className: 'sc-statsline' }, parts.join(' · ')) : null
     }
 
     /** Collapsible reasoning, streaming-aware. */
