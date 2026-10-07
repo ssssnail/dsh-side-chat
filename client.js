@@ -623,6 +623,18 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- usage */
 
+    /** What the dock shows before the first turn: zeros, like a fresh counter. */
+    const EMPTY_STATS = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReported: true,
+      ttfbMs: 0,
+      totalMs: 0,
+      toolCalls: 0,
+    }
+
     /** `input_tokens` excludes cache traffic, so the billed prompt is their sum. */
     function usageSummary(stats) {
       if (!stats) return null
@@ -836,9 +848,6 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'sc-pills' },
           h('button', { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value), title: t('usage') }, pills.join(' · ')),
-          usage.toolCalls > 0
-            ? h('button', { type: 'button', className: 'sc-pill', 'data-static': 'true' }, `${t('usageTools')} ${usage.toolCalls}`)
-            : null,
         ),
         open
           ? h(
@@ -881,9 +890,9 @@ window.__ModuleLoader__.load({
           : null,
         body
           ? h('div', { className: 'sc-md', dangerouslySetInnerHTML: { __html: renderMarkdown(body) } })
-          : streaming
+          : streaming && !message.reasoning
             ? h('div', { className: 'sc-tool-status' }, t('reasoningRunning'))
-            : message.error
+            : !streaming && message.error
               ? h('div', { className: 'sc-tool-status' }, t('unanswered'))
               : null,
         message.notice ? h('div', { className: 'sc-notice' }, message.notice) : null,
@@ -1148,9 +1157,7 @@ window.__ModuleLoader__.load({
                         ),
                   ),
                 ),
-                state.lastStats
-                  ? h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: state.lastStats }))
-                  : null,
+                h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: state.lastStats ?? EMPTY_STATS })),
               ),
             )
           : null,
