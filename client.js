@@ -81,7 +81,7 @@ window.__ModuleLoader__.load({
       stopping: '正在停止…',
       model: '模型',
       modelInherit: '继承自主会话',
-      modelTitle: '模型：{provider} · {model}',
+      modelTitle: '模型：{provider} · {model} · 推理强度 {effort}',
       compact: '压缩上下文',
       compactDone: '已压缩讨论上下文。',
       compactFailed: '压缩失败：{message}',
@@ -143,7 +143,7 @@ window.__ModuleLoader__.load({
       stopping: 'Stopping…',
       model: 'Model',
       modelInherit: 'inherited from the session',
-      modelTitle: 'Model: {provider} · {model}',
+      modelTitle: 'Model: {provider} · {model} · reasoning {effort}',
       compact: 'Compact context',
       compactDone: 'The discussion context was compacted.',
       compactFailed: 'Compaction failed: {message}',
@@ -1067,9 +1067,13 @@ window.__ModuleLoader__.load({
                       'span',
                       {
                         className: 'sc-label',
-                        title: route ? fill(t('modelTitle'), { provider: route.provider, model: route.model }) : t('model'),
+                        title: route
+                          ? fill(t('modelTitle'), { provider: route.provider, model: route.model, effort: route.reasoningEffort ?? '—' })
+                          : t('model'),
                       },
-                      route ? (modelName(state.models, route) ?? route.model) : t('modelInherit'),
+                      route
+                        ? `${modelName(state.models, route) ?? route.model}${route.reasoningEffort ? ` · ${route.reasoningEffort}` : ''}`
+                        : t('modelInherit'),
                     ),
                   ),
                   h(
