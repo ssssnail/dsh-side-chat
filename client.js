@@ -722,9 +722,10 @@ window.__ModuleLoader__.load({
 .sc-select{box-sizing:border-box;max-width:220px;height:28px;border:0;border-radius:var(--dsw-radius-sm,6px);background-color:transparent;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-position:right 4px center;background-repeat:no-repeat;background-size:12px 12px;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;appearance:none;outline:none;padding:0 20px 0 8px}
 .sc-select:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
 .sc-label{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:13px;line-height:20px}
-.sc-primary{box-sizing:border-box;display:grid;place-items:center;flex:none;width:34px;height:34px;border:0;border-radius:999px;background:var(--dsw-alias-button-info-fill,var(--dsw-alias-brand-primary));color:#fff;cursor:pointer;transition:background-color .1s;transform:translateY(-2px);padding:0}
-.sc-primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,var(--dsw-alias-button-info-fill))}
-.sc-primary:disabled{opacity:.4;cursor:default}
+.sc-root .sc-primary{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:34px;height:34px;min-width:34px;max-width:34px;min-height:34px;max-height:34px;aspect-ratio:1/1;padding:0;border:0;border-radius:50%;background:var(--dsw-alias-button-info-fill,var(--dsw-alias-brand-primary));color:#fff;line-height:0;cursor:pointer;transition:background-color .1s;transform:translateY(-2px)}
+.sc-root .sc-primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,var(--dsw-alias-button-info-fill))}
+.sc-root .sc-primary:disabled{opacity:.4;cursor:default}
+.sc-root .sc-primary>svg{display:block}
 .sc-icon{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
 .sc-icon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sc-icon[data-open="true"]{color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary))}
