@@ -216,7 +216,7 @@ await check('real dsh projection retains complete discussion rules for both rout
   const request = s.requests[0]
   for (const mode of [undefined, 'in-history']) {
     const projected = projectToolUpdates(request.messages, request.tools, mode, request.toolHistory)
-    const rules = projected.messages.find(entry => entry.role === 'system' && hasText([entry], '你是临时讨论助手'))
+    const rules = projected.messages.find(entry => entry.role === 'system' && hasText([entry], DISCUSSION_RULES))
     assert.ok(rules, 'the full instruction survives the real provider projection')
     assert.ok(hasText([rules], DISCUSSION_RULES))
   }

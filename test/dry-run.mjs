@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { apply } from '../index.js'
 import { createDiscussionRuntime } from '../host/runtime.js'
-import { FINAL_ANSWER_INSTRUCTION } from '../host/prompt.js'
+import { DISCUSSION_RULES, FINAL_ANSWER_INSTRUCTION } from '../host/prompt.js'
 
 /* ------------------------------------------------------------------ fake session */
 
@@ -557,7 +557,7 @@ await check('streams a read-only tool round and a final answer', async () => {
   // The second request inherited the first round's tool result and the instruction.
   const followUp = llm.requests.at(-1)
   assert.ok(followUp.messages.some((message) => message.role === 'tool'), 'tool result kept in history')
-  assert.ok(followUp.messages.some((message) => message.role === 'system' && message.content.some(block => block.text?.includes('你是临时讨论助手'))), 'full discussion instruction present')
+  assert.ok(followUp.messages.some((message) => message.role === 'system' && message.content.some(block => block.text?.includes(DISCUSSION_RULES))), 'full discussion instruction present')
   assert.equal(followUp.messages.some((message) => message.type === 'text' && /未完成的问题/.test(message.text ?? '')), false)
   assert.equal(followUp.sessionId, undefined, 'never binds a session id')
 })
