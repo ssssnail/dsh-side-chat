@@ -665,6 +665,7 @@ window.__ModuleLoader__.load({
 .sc-tool-status{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
 .sc-tool[data-status="error"] .sc-tool-status{color:var(--dsw-alias-state-error-primary)}
 .sc-tool-text{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
+.sc-statsline{box-sizing:border-box;min-width:0;max-width:100%;display:flex;align-items:center;gap:12px;padding:1px 6px 0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
 .sc-pill{border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 8px;cursor:pointer}
 .sc-pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
