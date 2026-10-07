@@ -193,7 +193,6 @@ window.__ModuleLoader__.load({
         messages: [],
         live: null,
         models: null,
-        lastStats: null,
         pendingQuestion: null,
         tag: undefined,
       }
@@ -255,15 +254,6 @@ window.__ModuleLoader__.load({
       } catch {
         return String(value)
       }
-    }
-
-    function formatTokens(value) {
-      const number = Number(value ?? 0)
-      if (!Number.isFinite(number)) return '0'
-      if (number >= 1_000_000_000) return `${Math.round(number / 1_000_000_000)}B`
-      if (number >= 1_000_000) return `${Math.round(number / 1_000_000)}M`
-      if (number >= 1_000) return `${Math.round(number / 1_000)}k`
-      return String(Math.round(number))
     }
 
     /* ---------------------------------------------------------------- api */
@@ -528,7 +518,7 @@ window.__ModuleLoader__.load({
           live.text = live.text || frame.text || ''
           live.stats = frame.stats ?? null
           live.streaming = false
-          store.set({ live: { ...live }, lastStats: frame.stats ?? null })
+          store.set({ live: { ...live } })
           return
         }
         store.set({ live: { ...live } })
@@ -613,14 +603,14 @@ window.__ModuleLoader__.load({
       const state = store.get()
       if (state.discussion) {
         const discussionId = state.discussion.discussionId
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null, notice: null })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null, notice: null })
         try {
           await api('/close', { discussionId })
         } catch {
           /* the instance is gone either way */
         }
       } else {
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null })
       }
       if (options.keepTab !== true && sidebar) {
         try {
@@ -631,275 +621,10 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /* --------------------------------------------------------------- usage */
-
-    /** What the dock shows before the first turn: zeros, like a fresh counter. */
-    const EMPTY_STATS = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cacheReported: true,
-      ttfbMs: 0,
-      totalMs: 0,
-      toolCalls: 0,
-    }
-
-    /** `input_tokens` excludes cache traffic, so the billed prompt is their sum. */
-    function usageSummary(stats) {
-      if (!stats) return null
-      const input = Number(stats.inputTokens ?? 0)
-      const cacheRead = Number(stats.cacheReadTokens ?? 0)
-      const cacheWrite = Number(stats.cacheWriteTokens ?? 0)
-      const output = Number(stats.outputTokens ?? 0)
-      const billed = input + cacheRead + cacheWrite
-      const percent = billed > 0 ? (cacheRead / billed) * 100 : 0
-      return {
-        input,
-        output,
-        cacheRead,
-        cacheWrite,
-        billed,
-        percent,
-        cacheReported: stats.cacheReported !== false,
-        ttfbMs: Number(stats.ttfbMs ?? 0),
-        totalMs: Number(stats.totalMs ?? 0),
-        toolCalls: Number(stats.toolCalls ?? 0),
-        provider: stats.provider ?? '',
-        model: stats.model ?? '',
-      }
-    }
-
-    function seconds(ms) {
-      const value = Number(ms ?? 0) / 1000
-      return value >= 10 ? String(Math.round(value)) : value.toFixed(1)
-    }
-
-    /* -------------------------------------------------------------- styles */
-
-    const CSS = `
-.sc-root{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);position:relative}
-.sc-grow{flex:1 1 auto;min-width:0}
-.sc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable;display:flex;flex-direction:column;gap:14px;padding:14px 12px 4px}
-.sc-turn{display:flex;flex-direction:column;gap:8px;min-width:0}
-.sc-question{align-self:flex-end;max-width:88%;box-sizing:border-box;background:var(--dsw-specific-bubble,var(--dsw-alias-bg-layer-1));border-radius:var(--dsw-radius-xl,12px);padding:10px 16px;white-space:pre-wrap;word-break:break-word;line-height:22px}
-.sc-answer{display:flex;flex-direction:column;gap:8px;min-width:0}
-.sc-answer-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.sc-md{line-height:22px;word-break:break-word}
-.sc-md p{margin:0 0 8px}
-.sc-md p:last-child{margin-bottom:0}
-.sc-md h3,.sc-md h4,.sc-md h5,.sc-md h6{margin:10px 0 6px;line-height:22px;font-weight:600}
-.sc-md ul,.sc-md ol{margin:0 0 8px;padding-left:20px}
-.sc-md li{margin:2px 0}
-.sc-md blockquote{margin:0 0 8px;padding:2px 0 2px 10px;border-left:2px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}
-.sc-md hr{border:0;border-top:.5px solid var(--dsw-alias-border-l2);margin:10px 0}
-.sc-md a{color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));text-decoration:none}
-.sc-md a:hover{text-decoration:underline}
-.sc-md code{background:var(--dsw-alias-interactive-bg-hover);border-radius:var(--dsw-radius-sm,4px);padding:1px 4px;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
-.sc-code{margin:0 0 8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);overflow-x:auto}
-.sc-code code{background:transparent;padding:0;font-size:12px;line-height:19px;white-space:pre}
-.sc-reason{display:flex;flex-direction:column;gap:4px}
-.sc-reason-row{display:flex;align-items:center;gap:6px;height:24px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);cursor:pointer;user-select:none}
-.sc-reason-row:hover{color:var(--dsw-alias-label-secondary)}
-.sc-reason-text{margin:0;padding:0 0 2px 2px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;white-space:pre-wrap;word-break:break-word}
-.sc-reason-text[data-streaming="true"]{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 48px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 48px),transparent)}
-.sc-tools{display:flex;flex-direction:column;gap:4px}
-.sc-tool{display:flex;align-items:flex-start;gap:6px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;color:var(--dsw-alias-label-secondary)}
-.sc-tool-name{font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);color:var(--dsw-alias-label-primary)}
-.sc-tool-status{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
-.sc-tool[data-status="error"] .sc-tool-status{color:var(--dsw-alias-state-error-primary)}
-.sc-tool-text{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
-.sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 6px 0}
-.sc-pill{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 10px;cursor:pointer}
-.sc-pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
-.sc-usage-line{box-sizing:border-box;display:flex;align-items:center;width:100%;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;padding:2px 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;text-align:left}
-.sc-usage-line:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
-.sc-usage-gap{flex:1 1 auto}
-.sc-pill[data-static="true"]{cursor:default}
-.sc-pill[data-static="true"]:hover{background:transparent}
-.sc-usage{margin-top:4px;padding:8px 10px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:18px}
-.sc-usage-row{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--dsw-alias-label-secondary)}
-.sc-usage-row b{font-weight:500;color:var(--dsw-alias-label-primary)}
-.sc-notice{margin:0 12px 8px;padding:4px 8px;border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:pre-wrap}
-.sc-notice[data-kind="error"]{color:var(--dsw-alias-state-error-primary)}
-.sc-empty{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px;text-align:center;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
-.sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
-.sc-composer{flex:none;padding:0 12px 8px}
-.sc-usage-dock{display:flex;flex-direction:column;gap:6px;padding:0 8px 2px}
-.sc-usage-detail{display:flex;flex-direction:column;gap:10px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1);margin-bottom:4px}
-.sc-usage-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
-.sc-usage-total{color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:18px;line-height:26px}
-.sc-usage-item{display:flex;flex-direction:column;gap:2px}
-.sc-usage-label{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
-.sc-usage-item b{color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:13px;font-weight:500;line-height:20px}
-.sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
-.sc-input{box-sizing:border-box;width:100%;resize:none;min-height:36px;max-height:200px;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:4px 8px 0 14px}
-.sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
-.sc-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:2px 8px 6px}
-.sc-tools-row{display:flex;align-items:center;gap:12px;min-width:0}
-.sc-trailing{display:flex;align-items:center;gap:12px;flex:none;margin-left:auto}
-.sc-select{box-sizing:border-box;max-width:220px;height:28px;border:0;border-radius:var(--dsw-radius-sm,6px);background-color:transparent;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-position:right 4px center;background-repeat:no-repeat;background-size:12px 12px;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;appearance:none;outline:none;padding:0 20px 0 8px}
-.sc-select:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
-.sc-label{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:13px;line-height:20px}
-.sc-root .sc-primary{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:34px;height:34px;min-width:34px;max-width:34px;min-height:34px;max-height:34px;aspect-ratio:1/1;padding:0;border:0;border-radius:50%;background:var(--dsw-alias-button-info-fill,var(--dsw-alias-brand-primary));color:#fff;line-height:0;cursor:pointer;transition:background-color .1s;transform:translateY(-2px)}
-.sc-root .sc-primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,var(--dsw-alias-button-info-fill))}
-.sc-root .sc-primary:disabled{opacity:.4;cursor:default}
-.sc-root .sc-primary>svg{display:block}
-.sc-icon{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
-.sc-icon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.sc-icon[data-open="true"]{color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary))}
-.sc-btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:18px;cursor:pointer;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
-.sc-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
-.sc-btn:disabled{cursor:not-allowed;opacity:.4}
-}
-`
-
-    /* ---------------------------------------------------------- components */
-
-    /** The composer entry; it also publishes this session's draft actions. */
-    function DiscussionEntry(props) {
-      const { sessionId, inputActions } = props
-      const t = makeT(props.t)
-      const state = useStoreState()
-      const draftRef = useRef('')
-      const draft = props.useInput ? props.useInput((value) => value.draft) : ''
-      draftRef.current = draft
-
-      useEffect(() => {
-        if (!sessionId || !inputActions) return undefined
-        draftTargets.set(sessionId, { inputActions, getDraft: () => draftRef.current })
-        return () => {
-          if (draftTargets.get(sessionId)?.inputActions === inputActions) draftTargets.delete(sessionId)
-        }
-      }, [sessionId, inputActions])
-
-      const active = state.parentSessionId === sessionId && state.status !== 'closed'
-      const open = useCallback(() => {
-        try {
-          sidebar?.openTab?.(TAB_KIND)
-        } catch (error) {
-          reportFailure('openTab', error)
-        }
-        if (!active) openDiscussion(sessionId)
-      }, [active, sessionId])
-
-      return h(
-        React.Fragment,
-        null,
-        h('style', null, CSS),
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'sc-icon',
-            'data-open': active ? 'true' : 'false',
-            title: active ? t('entryOpen') : t('entry'),
-            'aria-label': t('entry'),
-            onClick: open,
-          },
-          h(
-            'svg',
-            { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true },
-            h('path', {
-              d: 'M4 5.5h11a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H9l-3.5 3v-3H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z',
-              stroke: 'currentColor',
-              strokeWidth: 1.6,
-              strokeLinejoin: 'round',
-            }),
-            h('path', {
-              d: 'M18 9.5h2a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12',
-              stroke: 'currentColor',
-              strokeWidth: 1.6,
-              strokeLinejoin: 'round',
-              opacity: 0.7,
-            }),
-          ),
-        ),
-      )
-    }
-
-    /** Collapsible reasoning, streaming-aware. */
-    function ReasoningRow({ t, text, streaming }) {
-      const [open, setOpen] = useState(false)
-      const preview = text.length > 120 ? text.slice(-120) : text
-      return h(
-        'div',
-        { className: 'sc-reason' },
-        h(
-          'div',
-          { className: 'sc-reason-row', onClick: () => setOpen((value) => !value) },
-          h(
-            'svg',
-            { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'none', 'aria-hidden': true },
-            h('path', {
-              d: open ? 'M2.5 7.5L6 4l3.5 3.5' : 'M2.5 4.5L6 8l3.5-3.5',
-              stroke: 'currentColor',
-              strokeWidth: 1.4,
-              strokeLinecap: 'round',
-              strokeLinejoin: 'round',
-            }),
-          ),
-          h('span', null, streaming ? t('reasoningRunning') : t('reasoning')),
-        ),
-        streaming && !open
-          ? h('div', { className: 'sc-reason-text', 'data-streaming': 'true' }, preview)
-          : open
-            ? h('div', { className: 'sc-reason-text' }, text)
-            : null,
-      )
-    }
-
     /** The catalogue's display name for a route, when it is known. */
     function modelName(models, route) {
       const list = models?.models?.[route?.provider] ?? []
       return list.find((model) => model.id === route?.model)?.name ?? undefined
-    }
-
-    /** Thousands-separated, exactly as a token counter reads. */
-    function exact(value) {
-      return Number(value ?? 0).toLocaleString('en-US')
-    }
-
-    /** One compact usage line; opening it shows the full token breakdown. */
-    function UsagePills({ t, stats }) {
-      const [open, setOpen] = useState(false)
-      const usage = usageSummary(stats)
-      if (!usage) return null
-      const total = usage.billed + usage.output
-      const percent = usage.percent === 0 ? '0%' : `${usage.percent.toFixed(1)}%`
-      const row = (label, value) =>
-        h('div', { className: 'sc-usage-item', key: label }, h('span', { className: 'sc-usage-label' }, label), h('b', null, value))
-      return h(
-        'div',
-        { className: 'sc-usage-dock' },
-        h(
-          'div',
-          { className: 'sc-pills' },
-          h(
-            'button',
-            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
-            `${t('usageCacheHit')} ${percent}`,
-          ),
-          h(
-            'button',
-            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
-            fill(t('usageTotalLine'), { value: formatTokens(total) }),
-          ),
-        ),
-        open
-          ? h(
-              'div',
-              { className: 'sc-usage-detail' },
-              h('div', { className: 'sc-usage-title' }, t('usageTitle')),
-              h('div', { className: 'sc-usage-total' }, exact(total)),
-              row(t('usageCacheHit'), percent),
-              row(t('usageUncachedInput'), exact(usage.input)),
-              row(t('usageCacheReadLabel'), exact(usage.cacheRead)),
-              row(t('usageOutput'), exact(usage.output)),
-              usage.cacheWrite > 0 ? row(t('usageCacheWrite'), exact(usage.cacheWrite)) : null,
-            )
-          : null,
-      )
     }
 
     function ToolRow({ t, tool }) {
@@ -1109,14 +834,7 @@ window.__ModuleLoader__.load({
                   value: draft,
                   placeholder: t('placeholder'),
                   rows: 1,
-                  onChange: (event) => {
-                    setDraft(event.target.value)
-                    const element = event.target
-                    if (element?.style) {
-                      element.style.height = 'auto'
-                      element.style.height = `${Math.min(element.scrollHeight || 36, 200)}px`
-                    }
-                  },
+                  onChange: (event) => setDraft(event.target.value),
                   onKeyDown,
                   onFocus: () => loadModels(),
                   onCompositionStart: () => composing.add('*'),
@@ -1188,7 +906,6 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
-              h(UsagePills, { t, stats: state.lastStats ?? EMPTY_STATS }),
             )
           : null,
       )

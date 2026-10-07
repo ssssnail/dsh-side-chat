@@ -248,8 +248,6 @@ await check('the panel renders the prepared discussion', () => {
   assert.match(text, /这是一个临时会话，关闭后会清除所有信息/)
   assert.equal(text.includes('read · glob · grep'), false, 'no tools line in the chrome')
   assert.ok(find(tree, (element) => element.props?.className === 'sc-input'), 'the composer input')
-  // The usage dock is part of the composer from the start.
-  assert.match(text, /缓存命中率 0%/)
 })
 
 await check('closing is the tab chrome alone: no dialog, no close handler', () => {
