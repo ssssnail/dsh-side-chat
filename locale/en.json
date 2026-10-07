@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Temporary session",
+    "description": "A read-only temporary session beside the running one: an independent context snapshot, multi-turn answers, nothing saved after closing."
+  }
+}

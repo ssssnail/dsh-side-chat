@@ -1,0 +1,5 @@
+# Inserts the Host half of the temporary-discussion plugin.
+# The Client half is the package's `./client` export (see `dsh.client` in package.json).
+- insert:
+    - id: side-chat
+      name: '@local/dsh-side-chat'
