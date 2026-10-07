@@ -24,6 +24,8 @@ import { createReadOnlyToolbox, READ_ONLY_TOOL_NAMES } from './readonly-tools.js
 const MAX_TOOL_ROUNDS = 4
 /** Consecutive all-failed tool rounds tolerated before the turn is ended. */
 const MAX_FAILED_ROUNDS = 2
+/** Consecutive all-refused rounds tolerated before the turn is closed. */
+const MAX_REFUSED_ROUNDS = 2
 /** How many recent turns `/compact` keeps verbatim. */
 const COMPACT_KEEP_TURNS = 2
 
@@ -332,6 +334,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       // is refused instead of executed again.
       const failedCalls = discussion.failedCalls ?? (discussion.failedCalls = new Set())
       let failedRounds = 0
+      let refusedRounds = 0
       for (let round = 0; ; round += 1) {
         discussion.steps += 1
         const step = round + 1
@@ -499,6 +502,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
         }
         let roundFailures = 0
         let roundRefusals = 0
+        let roundRepeats = 0
         for (const call of toolCalls) {
           stats.toolCalls += 1
           const signature = `${call.name}\u0000${call.arguments ?? ''}`
@@ -512,6 +516,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
               text: `同一调用 ${call.name} 参数完全相同且已经失败过，不再重复执行。`,
               isError: true,
               refused: true,
+              repeat: true,
             }
           } else {
             result = await discussion.toolbox.execute(call.name, call.arguments, controller.signal)
@@ -519,6 +524,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
           }
           if (result.isError) roundFailures += 1
           if (result.refused) roundRefusals += 1
+          if (result.repeat) roundRepeats += 1
           parts.push({
             kind: 'tool',
             name: call.name,
@@ -561,11 +567,29 @@ export function createDiscussionRuntime(ctx, options = {}) {
         // session does not declare, or a path outside the workspace). Asking the
         // model again cannot help, so the turn ends with a professional notice
         // instead of a retry loop.
-        if (roundRefusals > 0 && roundRefusals === toolCalls.length) {
-          emit({ type: 'notice', level: 'warn', message: '已按只读范围拒绝这些调用，本轮结束。' })
+        if (roundRepeats > 0 && roundRepeats === toolCalls.length) {
+          emit({ type: 'notice', level: 'warn', message: '同一调用已失败过，不再重复执行，本轮结束。' })
           turn.status = 'done'
           break
         }
+        if (roundRefusals > 0 && roundRefusals === toolCalls.length) {
+          // The model usually imitates the parent history's tools. Refuse, tell
+          // it what this session actually has, and let it try once more before
+          // the turn is closed.
+          refusedRounds += 1
+          if (refusedRounds >= MAX_REFUSED_ROUNDS) {
+            emit({ type: 'notice', level: 'warn', message: '已按只读范围拒绝这些调用，本轮结束。' })
+            turn.status = 'done'
+            break
+          }
+          emit({
+            type: 'notice',
+            level: 'warn',
+            message: '这些工具不在本次只读会话里；请改用 read、glob 或 grep 重新获取信息，或直接回答。',
+          })
+          continue
+        }
+        refusedRounds = 0
         failedRounds = roundFailures === toolCalls.length ? failedRounds + 1 : 0
         if (failedRounds >= MAX_FAILED_ROUNDS) {
           emit({
