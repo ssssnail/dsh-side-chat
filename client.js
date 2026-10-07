@@ -774,7 +774,7 @@ window.__ModuleLoader__.load({
     }
 
     /** The one-line session stats that fill the composer's reserved height. */
-    function UsageLine({ t, messages, lastStats }) {
+    function UsageLine({ t, messages, lastStats, discussion }) {
       const compact = (value) => {
         const n = Number(value ?? 0)
         if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B`
@@ -799,8 +799,9 @@ window.__ModuleLoader__.load({
       const billed = input + cacheRead + cacheWrite
       const percent = billed > 0 ? Math.round((cacheRead / billed) * 100) : 0
       const tokPerSec = lastStats && Number(lastStats.totalMs) > 0 ? Math.round(output / (Number(lastStats.totalMs) / 1000)) : 0
+      const steps = Number(lastStats?.steps ?? discussion?.steps ?? 0)
       const parts = []
-      if (turns > 0) parts.push(`${turns} 轮`)
+      if (turns > 0) parts.push(`${turns} 轮 ${steps} 步`)
       if (total > 0) parts.push(`${compact(total)} tok`)
       if (tokPerSec > 0) parts.push(`${tokPerSec} tok/s`)
       if (lastStats) parts.push(`${t('usageCacheHit')} ${percent}%`)
@@ -1125,6 +1126,7 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
+              h(UsageLine, { t, messages, lastStats: state.lastStats, discussion }),
             )
           : null,
       )
