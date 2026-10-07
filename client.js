@@ -35,8 +35,6 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 
     let sidebar = null
-    /** Discussion ids by parent session id, for the entry's active state. */
-    const byParent = new Map()
     /** The main composer of each session, for "放入主会话草稿". */
     const draftTargets = new Map()
     const composing = new Set()
@@ -448,7 +446,6 @@ window.__ModuleLoader__.load({
           api('/close', { discussionId: result.discussion.discussionId }).catch(() => {})
           return undefined
         }
-        byParent.set(parentSessionId, result.discussion.discussionId)
         store.set({ status: 'idle', discussion: result.discussion, tag: undefined })
         loadModels()
         const pending = store.get().pendingQuestion
@@ -615,7 +612,6 @@ window.__ModuleLoader__.load({
       const state = store.get()
       if (state.discussion) {
         const discussionId = state.discussion.discussionId
-        byParent.delete(state.parentSessionId)
         store.set({ status: 'closed', discussion: null, messages: [], live: null, closeConfirm: false, notice: null })
         try {
           await api('/close', { discussionId })

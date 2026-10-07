@@ -754,14 +754,6 @@ export function createDiscussionRuntime(ctx, options = {}) {
     }
   }
 
-  /** Resolve the live discussion of one Session, for a page that lost its state. */
-  function findBySession(sessionId) {
-    for (const discussion of discussions.values()) {
-      if (discussion.sessionId === sessionId) return view(discussion)
-    }
-    return undefined
-  }
-
   function get(discussionId) {
     const discussion = discussions.get(discussionId)
     return discussion ? view(discussion) : undefined
@@ -777,7 +769,6 @@ export function createDiscussionRuntime(ctx, options = {}) {
     setModel,
     listModels,
     get,
-    findBySession,
     list: () => [...discussions.values()].map(view),
   }
 }

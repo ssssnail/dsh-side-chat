@@ -101,12 +101,6 @@ export function apply(ctx) {
     if (req.method === 'GET' && pathname === `${ROUTE_PREFIX}/ping`) {
       return sendJson(res, 200, { ok: true, service: 'side-chat', revision: PLUGIN_REVISION })
     }
-    if (req.method === 'GET' && pathname === `${ROUTE_PREFIX}/by-session`) {
-      const sessionId = url.searchParams.get('sessionId') ?? ''
-      const discussion = runtime.findBySession(sessionId)
-      return sendJson(res, 200, discussion ? { ok: true, discussion } : { ok: false, message: '没有该会话的讨论实例。' })
-    }
-
     if (req.method === 'GET' && pathname === `${ROUTE_PREFIX}/models`) {
       return sendJson(res, 200, { ok: true, ...(await runtime.listModels()) })
     }
