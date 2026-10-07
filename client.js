@@ -34,6 +34,22 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 
+    /** The send/stop button is a circle by construction, not by stylesheet. */
+    const ROUND_BUTTON = {
+      width: 34,
+      height: 34,
+      minWidth: 34,
+      minHeight: 34,
+      maxWidth: 34,
+      maxHeight: 34,
+      padding: 0,
+      border: 0,
+      borderRadius: '50%',
+      aspectRatio: '1 / 1',
+      flex: '0 0 auto',
+      lineHeight: 0,
+    }
+
     let sidebar = null
     /** The main composer of each session, for "放入主会话草稿". */
     const draftTargets = new Map()
@@ -693,8 +709,8 @@ window.__ModuleLoader__.load({
 .sc-tool-status{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
 .sc-tool[data-status="error"] .sc-tool-status{color:var(--dsw-alias-state-error-primary)}
 .sc-tool-text{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
-.sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
-.sc-pill{border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 8px;cursor:pointer}
+.sc-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 6px 0}
+.sc-pill{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;border-radius:999px;padding:1px 10px;cursor:pointer}
 .sc-pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .sc-usage-line{box-sizing:border-box;display:flex;align-items:center;width:100%;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;padding:2px 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;text-align:left}
 .sc-usage-line:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
@@ -857,11 +873,18 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'sc-usage-dock' },
         h(
-          'button',
-          { type: 'button', className: 'sc-usage-line', onClick: () => setOpen((value) => !value) },
-          h('span', null, `${t('usageCacheHit')} ${percent}`),
-          h('span', { className: 'sc-usage-gap' }),
-          h('span', null, fill(t('usageTotalLine'), { value: formatTokens(total) })),
+          'div',
+          { className: 'sc-pills' },
+          h(
+            'button',
+            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
+            `${t('usageCacheHit')} ${percent}`,
+          ),
+          h(
+            'button',
+            { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value) },
+            fill(t('usageTotalLine'), { value: formatTokens(total) }),
+          ),
         ),
         open
           ? h(
@@ -1127,6 +1150,7 @@ window.__ModuleLoader__.load({
                           {
                             type: 'button',
                             className: 'sc-primary',
+                            style: ROUND_BUTTON,
                             onClick: stopAnswer,
                             disabled: state.status === 'stopping',
                             title: t('stop'),
@@ -1143,6 +1167,7 @@ window.__ModuleLoader__.load({
                           {
                             type: 'button',
                             className: 'sc-primary',
+                            style: ROUND_BUTTON,
                             onClick: submit,
                             disabled: draft.trim().length === 0,
                             title: t('send'),
