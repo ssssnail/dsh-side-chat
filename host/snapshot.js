@@ -122,11 +122,13 @@ export function selectRoute(ctx, session) {
       if (event?.type !== 'model/selection') continue
       const selection = event.data
       if (selection?.provider && selection?.model) {
-        return {
-          provider: selection.provider,
-          model: selection.model,
-          ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+        if (selection.reasoningEffort) {
+          return { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
         }
+        // The model selector sets provider/model but not the reasoning effort;
+        // fall through so the effort is inherited from the logged header or the
+        // configured default rather than silently dropped.
+        break
       }
       break
     }
