@@ -35,8 +35,6 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 
     let sidebar = null
-    /** Set while a confirmed close is in flight, so the handler does not re-ask. */
-    let closingConfirmed = false
     /** The main composer of each session, for "放入主会话草稿". */
     const draftTargets = new Map()
     const composing = new Set()
@@ -60,6 +58,7 @@ window.__ModuleLoader__.load({
       workspace: '工作区：{path}',
       starting: '正在准备临时会话…',
       emptySimple: '这是一个临时会话，关闭后会清除所有信息。',
+      closing: '关闭中…',
       placeholder: '提出讨论问题，Enter 发送，Shift+Enter 换行',
       send: '发送',
       stop: '停止回答',
@@ -170,7 +169,7 @@ window.__ModuleLoader__.load({
         messages: [],
         live: null,
         models: null,
-        closeConfirm: false,
+        lastStats: null,
         pendingQuestion: null,
         tag: undefined,
       }
@@ -429,7 +428,6 @@ window.__ModuleLoader__.load({
         return existing.discussion
       }
       if (existing.discussion) await closeDiscussion({ keepTab: true })
-      closingConfirmed = false
       const tag = `panel-${++openCounter}-${Date.now()}`
       store.set({
         status: 'creating',
@@ -505,6 +503,8 @@ window.__ModuleLoader__.load({
           live.text = live.text || frame.text || ''
           live.stats = frame.stats ?? null
           live.streaming = false
+          store.set({ live: { ...live }, lastStats: frame.stats ?? null })
+          return
         }
         store.set({ live: { ...live } })
       }
@@ -590,18 +590,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function compactContext(t, notify) {
-      const state = store.get()
-      if (!state.discussion) return
-      try {
-        const result = await api('/compact', { discussionId: state.discussion.discussionId })
-        notify(result.ok ? t('compactDone') : fill(t('compactFailed'), { message: result.message ?? '' }))
-      } catch (error) {
-        reportFailure('compact', error)
-        notify(fill(t('compactFailed'), { message: String(error?.message ?? error) }))
-      }
-    }
-
     async function loadModels() {
       if (store.get().models) return
       try {
@@ -615,14 +603,14 @@ window.__ModuleLoader__.load({
       const state = store.get()
       if (state.discussion) {
         const discussionId = state.discussion.discussionId
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, closeConfirm: false, notice: null })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null, notice: null })
         try {
           await api('/close', { discussionId })
         } catch {
           /* the instance is gone either way */
         }
       } else {
-        store.set({ status: 'closed', discussion: null, messages: [], live: null, closeConfirm: false })
+        store.set({ status: 'closed', discussion: null, messages: [], live: null, lastStats: null })
       }
       if (options.keepTab !== true && sidebar) {
         try {
@@ -670,11 +658,6 @@ window.__ModuleLoader__.load({
     const CSS = `
 .sc-root{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);position:relative}
 .sc-grow{flex:1 1 auto;min-width:0}
-.sc-head{display:flex;flex-direction:column;gap:3px;padding:10px 12px 8px;border-bottom:.5px solid var(--dsw-alias-border-l1);flex:none}
-.sc-head-row{display:flex;align-items:center;gap:8px;min-width:0}
-.sc-title{color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);font-weight:500;line-height:22px;white-space:nowrap}
-.sc-badge{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sc-meta{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable;display:flex;flex-direction:column;gap:14px;padding:14px 12px 4px}
 .sc-turn{display:flex;flex-direction:column;gap:8px;min-width:0}
 .sc-question{align-self:flex-end;max-width:88%;box-sizing:border-box;background:var(--dsw-specific-bubble,var(--dsw-alias-bg-layer-1));border-radius:var(--dsw-radius-xl,12px);padding:10px 16px;white-space:pre-wrap;word-break:break-word;line-height:22px}
@@ -715,11 +698,9 @@ window.__ModuleLoader__.load({
 .sc-notice{margin:0 12px 8px;padding:4px 8px;border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;white-space:pre-wrap}
 .sc-notice[data-kind="error"]{color:var(--dsw-alias-state-error-primary)}
 .sc-empty{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px;text-align:center;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
-.sc-empty-title{margin-top:4px;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);font-weight:500;line-height:22px}
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
-.sc-facts{display:flex;flex-direction:column;gap:3px;max-width:340px;margin-top:6px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
 .sc-composer{flex:none;padding:0 12px 8px}
-.sc-usage-dock{flex:none;padding:0 20px 10px;display:flex;flex-direction:column;gap:6px}
+.sc-usage-dock{display:flex;flex-direction:column;gap:6px;padding:0 8px 2px}
 .sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
 .sc-input{box-sizing:border-box;width:100%;resize:none;min-height:36px;max-height:200px;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:4px 8px 0 14px}
 .sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
@@ -735,20 +716,10 @@ window.__ModuleLoader__.load({
 .sc-icon{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
 .sc-icon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sc-icon[data-open="true"]{color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary))}
-.sc-iconBtn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:14px;line-height:1;cursor:pointer;flex:none}
-.sc-iconBtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sc-btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:18px;cursor:pointer;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .sc-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .sc-btn:disabled{cursor:not-allowed;opacity:.4}
-.sc-btn.primary{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff)}
-.sc-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-button-primary-fill))}
-.sc-modal{position:absolute;inset:0;background:rgba(15,23,42,.36);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
-.sc-dialog{background:var(--dsw-alias-bg-overlay);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg,12px);padding:16px;max-width:340px;display:flex;flex-direction:column;gap:8px;box-shadow:0 12px 32px rgba(0,0,0,.28)}
-.sc-dialog h3{margin:0;font-size:var(--dsh-content-font-size,14px);line-height:22px}
-.sc-dialog p{margin:0;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;color:var(--dsw-alias-label-secondary)}
-.sc-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
-.sc-spin{animation:sc-spin 1s linear infinite}
-@keyframes sc-spin{to{transform:rotate(360deg)}}
+}
 `
 
     /* ---------------------------------------------------------- components */
@@ -959,44 +930,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConfirmDialog({ t }) {
-      const state = useStoreState()
-      if (!state.closeConfirm) return null
-      const busy = state.status === 'generating' || state.status === 'stopping'
-      return h(
-        'div',
-        { className: 'sc-modal', onClick: () => store.set({ closeConfirm: false }) },
-        h(
-          'div',
-          { className: 'sc-dialog', onClick: (event) => event.stopPropagation() },
-          h('h3', null, t('closeTitle')),
-          h('p', null, t('closeBody')),
-          busy ? h('p', null, t('closeBusy')) : null,
-          h(
-            'div',
-            { className: 'sc-dialog-actions' },
-            h(
-              'button',
-              { type: 'button', className: 'sc-btn primary', autoFocus: true, onClick: () => store.set({ closeConfirm: false }) },
-              t('keepDiscussing'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'sc-btn',
-                onClick: () => {
-                  closingConfirmed = true
-                  closeDiscussion()
-                },
-              },
-              t('closeAndClear'),
-            ),
-          ),
-        ),
-      )
-    }
-
     /** The panel: header facts, transcript, composer, close confirmation. */
     function DiscussionPanel(props) {
       const t = makeT(props.t)
@@ -1014,6 +947,16 @@ window.__ModuleLoader__.load({
         const element = scrollRef.current
         if (element) element.scrollTop = element.scrollHeight
       }, [messages.length, live?.text, live?.reasoning, live?.tools?.length])
+
+      // Closing the tab unmounts this body: that is the close, and the instance
+      // must not outlive it.
+      useEffect(
+        () => () => {
+          const current = store.get()
+          if (current.discussion) closeDiscussion({ keepTab: true })
+        },
+        [],
+      )
 
       const notify = useCallback((message) => {
         setNotice(message)
@@ -1042,55 +985,11 @@ window.__ModuleLoader__.load({
         }
       }
       const route = discussion?.route
-      const lastStats = [...messages].reverse().find((message) => message.stats)?.stats ?? live?.stats ?? null
 
       return h(
         'div',
         { className: 'sc-root' },
         h('style', null, CSS),
-        h(
-          'div',
-          { className: 'sc-head' },
-          h(
-            'div',
-            { className: 'sc-head-row' },
-            h('span', { className: 'sc-title' }, t('title')),
-            h('span', { className: 'sc-grow' }),
-            discussion
-              ? h(
-                  'button',
-                  { type: 'button', className: 'sc-iconBtn', title: t('compact'), onClick: () => compactContext(t, notify) },
-                  h(
-                    'svg',
-                    { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
-                    h('path', {
-                      d: 'M3 6h10M3 10h10M6 3v10M10 3v10',
-                      stroke: 'currentColor',
-                      strokeWidth: 1.3,
-                      strokeLinecap: 'round',
-                    }),
-                  ),
-                )
-              : null,
-          ),
-          discussion
-            ? h(
-                'div',
-                { className: 'sc-meta' },
-                [
-                  fill(t('parent'), { label: discussion.parentLabel ?? discussion.parentSessionId }),
-                  fill(t('snapshot'), { time: formatTime(discussion.snapshotTime) }),
-                  discussion.empty
-                    ? t('inheritedEmpty')
-                    : fill(t('inherited'), { turns: discussion.completedTurns, tokens: formatTokens(discussion.estimatedTokens) }),
-                  discussion.truncated ? t('truncated') : null,
-                  discussion.omittedMessages > 0 ? fill(t('omitted'), { count: discussion.omittedMessages }) : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · '),
-              )
-            : null,
-        ),
         state.openError && state.status !== 'error' ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.openError) : null,
         !discussion && state.status === 'creating'
           ? h(
@@ -1249,11 +1148,12 @@ window.__ModuleLoader__.load({
                         ),
                   ),
                 ),
+                state.lastStats
+                  ? h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: state.lastStats }))
+                  : null,
               ),
             )
           : null,
-        discussion && lastStats ? h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: lastStats })) : null,
-        h(ConfirmDialog, { t }),
       )
     }
 
@@ -1311,18 +1211,6 @@ window.__ModuleLoader__.load({
       // A close from the tab chrome must ask first: the sidebar documents that a
       // FAILING close handler preserves the tab, so the unconfirmed path throws
       // and the confirm renders in the still-mounted panel.
-      ctx.effect(
-        () =>
-          ctx.sidebarRight.registerCloseHandler(TAB_KIND, async () => {
-            if (!closingConfirmed) {
-              store.set({ closeConfirm: true })
-              throw new Error('side-chat: close awaits confirmation')
-            }
-            closingConfirmed = false
-            await closeDiscussion({ keepTab: true })
-          }),
-        'side-chat:close',
-      )
     }
 
     return { inject, apply }
