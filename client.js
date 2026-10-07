@@ -936,9 +936,14 @@ window.__ModuleLoader__.load({
 
       ctx.effect(
         () =>
-          ctx.slots.inject('conversation.input.left', () =>
-            ctx.slots.register({ name: 'conversation.input.left', id: TAB_ID, order: 50, locale: NS }, DiscussionEntry),
-          ),
+          ctx.slots.inject('conversation.input.left', () => {
+            try {
+              window.console?.info?.('[side-chat] registering the composer entry')
+            } catch {
+              /* console is optional */
+            }
+            return ctx.slots.register({ name: 'conversation.input.left', id: TAB_ID }, DiscussionEntry)
+          }),
         'side-chat:entry',
       )
 
@@ -950,6 +955,16 @@ window.__ModuleLoader__.load({
             priority: 'extension',
             canOpen: () => false,
             title: () => copy(ctx, 'title'),
+            // A tab type that owns no address is offered through the sidebar's
+            // guide card; this is its documented entry point.
+            guide: [
+              {
+                id: TAB_KIND,
+                order: 40,
+                title: () => copy(ctx, 'title'),
+                description: () => copy(ctx, 'entryOpen'),
+              },
+            ],
           }),
         'side-chat:tab',
       )
