@@ -123,6 +123,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       headerKey: undefined,
       summary: [],
       turns: [],
+      steps: 0,
       route: snapshot.route,
       contextWindow: snapshot.contextWindow,
       toolbox,
@@ -332,6 +333,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       const failedCalls = discussion.failedCalls ?? (discussion.failedCalls = new Set())
       let failedRounds = 0
       for (let round = 0; ; round += 1) {
+        discussion.steps += 1
         const step = round + 1
         if (session && openStep) {
           appendSafe(session, 'step/end', { turn: turnNumber, step: openStep }, undefined, log)
@@ -637,6 +639,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
 
     emit({
       type: 'done',
+      steps: discussion.steps,
       status: turn.status,
       text: turn.text,
       parts: parts.map((part) => ({ ...part })),
@@ -751,6 +754,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       route: { ...discussion.route },
       generating: Boolean(discussion.busy),
       stats: discussion.stats.map((entry) => ({ ...entry })),
+      steps: discussion.steps,
     }
   }
 
