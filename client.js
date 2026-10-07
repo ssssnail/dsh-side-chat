@@ -805,7 +805,8 @@ window.__ModuleLoader__.load({
       if (total > 0) parts.push(`${compact(total)} tok`)
       if (tokPerSec > 0) parts.push(`${tokPerSec} tok/s`)
       if (lastStats) parts.push(`${t('usageCacheHit')} ${percent}%`)
-      return parts.length > 0 ? h('div', { className: 'sc-statsline' }, parts.join(' · ')) : null
+      // Always render the row so it reserves its 22px even before any turn.
+      return h('div', { className: 'sc-statsline' }, parts.join(' · '))
     }
 
     /** Collapsible reasoning, streaming-aware. */
