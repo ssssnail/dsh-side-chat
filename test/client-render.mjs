@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 
 let hookSlots = []
 let hookIndex = 0
@@ -258,6 +259,16 @@ await check('closing is the tab chrome alone: no dialog, no close handler', () =
 
 await check('every rendered copy key exists in the dictionary', () => {
   assert.deepEqual([...missingKeys], [], 'no missing locale keys')
+})
+
+
+await check('the bundle has no dangling component reference', async () => {
+  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  const defined = new Set([...source.matchAll(/function ([A-Z][A-Za-z0-9]+)\(/g)].map((m) => m[1]))
+  const used = new Set([...source.matchAll(/\bh\(([A-Z][A-Za-z0-9]+)[,)]/g)].map((m) => m[1]))
+  const dangling = [...used].filter((name) => !defined.has(name))
+  assert.deepEqual(dangling, [], `h() references components that are not defined: ${dangling.join(', ')}`)
+  assert.ok(source.includes('const CSS ='), 'the bundle defines its stylesheet')
 })
 
 console.log(`\n${failures.length === 0 ? 'all checks passed' : `${failures.length} check(s) failed`}\n`)
