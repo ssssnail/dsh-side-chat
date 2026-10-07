@@ -89,6 +89,10 @@ window.__ModuleLoader__.load({
       usageCacheRead: '缓存命中',
       usageCacheWrite: '缓存写入',
       usageCacheHit: '缓存命中率',
+      usageTitle: 'Token 用量',
+      usageUncachedInput: '未缓存输入',
+      usageCacheReadLabel: '缓存读取',
+      usageTotalLine: '{value} tok',
       usageTtfb: '首字',
       usageTotal: '总耗时',
       usageTools: '工具调用',
@@ -146,6 +150,10 @@ window.__ModuleLoader__.load({
       usageCacheRead: 'Cache read',
       usageCacheWrite: 'Cache write',
       usageCacheHit: 'Cache hit',
+      usageTitle: 'Token usage',
+      usageUncachedInput: 'Uncached input',
+      usageCacheReadLabel: 'Cache read',
+      usageTotalLine: '{value} tok',
       usageTtfb: 'First token',
       usageTotal: 'Total',
       usageTools: 'Tool calls',
@@ -236,8 +244,9 @@ window.__ModuleLoader__.load({
     function formatTokens(value) {
       const number = Number(value ?? 0)
       if (!Number.isFinite(number)) return '0'
-      if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`
-      if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`
+      if (number >= 1_000_000_000) return `${Math.round(number / 1_000_000_000)}B`
+      if (number >= 1_000_000) return `${Math.round(number / 1_000_000)}M`
+      if (number >= 1_000) return `${Math.round(number / 1_000)}k`
       return String(Math.round(number))
     }
 
@@ -578,15 +587,24 @@ window.__ModuleLoader__.load({
     async function switchModel(route) {
       const state = store.get()
       if (!state.discussion) return
+      const previous = state.discussion.route
+      // Show the choice immediately; the turn takes it from here.
+      store.set((current) => ({
+        discussion: current.discussion ? { ...current.discussion, route: { ...route } } : current.discussion,
+        notice: null,
+      }))
       try {
         const result = await api('/model', { discussionId: state.discussion.discussionId, route })
-        if (result.ok) {
-          store.set((current) => ({
-            discussion: current.discussion ? { ...current.discussion, route: result.route } : current.discussion,
-          }))
-        }
+        if (!result.ok) throw new Error(result.message ?? '模型切换失败')
+        store.set((current) => ({
+          discussion: current.discussion ? { ...current.discussion, route: result.route } : current.discussion,
+        }))
       } catch (error) {
         reportFailure('model', error)
+        store.set((current) => ({
+          discussion: current.discussion ? { ...current.discussion, route: previous } : current.discussion,
+          notice: `模型切换失败：${String(error?.message ?? error)}`,
+        }))
       }
     }
 
@@ -713,6 +731,15 @@ window.__ModuleLoader__.load({
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
 .sc-composer{flex:none;padding:0 12px 8px}
 .sc-usage-dock{display:flex;flex-direction:column;gap:6px;padding:0 8px 2px}
+.sc-usage-line{box-sizing:border-box;display:flex;align-items:center;width:100%;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font:inherit;font-size:12px;line-height:18px;padding:2px 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;text-align:left}
+.sc-usage-line:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.sc-usage-gap{flex:1 1 auto}
+.sc-usage-detail{display:flex;flex-direction:column;gap:10px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1);margin-bottom:4px}
+.sc-usage-title{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
+.sc-usage-total{color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:18px;line-height:26px}
+.sc-usage-item{display:flex;flex-direction:column;gap:2px}
+.sc-usage-label{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
+.sc-usage-item b{color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:13px;font-weight:500;line-height:20px}
 .sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
 .sc-input{box-sizing:border-box;width:100%;resize:none;min-height:36px;max-height:200px;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:4px 8px 0 14px}
 .sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
@@ -829,38 +856,41 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Token and timing pills; the summary pill opens the full breakdown. */
+    /** Thousands-separated, exactly as a token counter reads. */
+    function exact(value) {
+      return Number(value ?? 0).toLocaleString('en-US')
+    }
+
+    /** One compact usage line; opening it shows the full token breakdown. */
     function UsagePills({ t, stats }) {
       const [open, setOpen] = useState(false)
       const usage = usageSummary(stats)
       if (!usage) return null
-      const pills = [
-        usage.cacheReported ? `${t('usageCacheHit')} ${usage.percent.toFixed(0)}%` : t('usageNoCache'),
-        `↑ ${formatTokens(usage.input)}`,
-        `↓ ${formatTokens(usage.output)}`,
-        `${seconds(usage.totalMs)}s`,
-      ]
-      const row = (label, value) => h('div', { className: 'sc-usage-row', key: label }, h('span', null, label), h('b', null, value))
+      const total = usage.billed + usage.output
+      const percent = usage.percent === 0 ? '0%' : `${usage.percent.toFixed(1)}%`
+      const row = (label, value) =>
+        h('div', { className: 'sc-usage-item', key: label }, h('span', { className: 'sc-usage-label' }, label), h('b', null, value))
       return h(
         'div',
-        null,
+        { className: 'sc-usage-dock' },
         h(
-          'div',
-          { className: 'sc-pills' },
-          h('button', { type: 'button', className: 'sc-pill', onClick: () => setOpen((value) => !value), title: t('usage') }, pills.join(' · ')),
+          'button',
+          { type: 'button', className: 'sc-usage-line', onClick: () => setOpen((value) => !value) },
+          h('span', null, `${t('usageCacheHit')} ${percent}`),
+          h('span', { className: 'sc-usage-gap' }),
+          h('span', null, fill(t('usageTotalLine'), { value: formatTokens(total) })),
         ),
         open
           ? h(
               'div',
-              { className: 'sc-usage' },
-              row(t('usageInput'), `${formatTokens(usage.input)} tokens`),
-              row(t('usageOutput'), `${formatTokens(usage.output)} tokens`),
-              row(t('usageCacheRead'), `${formatTokens(usage.cacheRead)} tokens`),
-              row(t('usageCacheWrite'), `${formatTokens(usage.cacheWrite)} tokens`),
-              row(t('usageCacheHit'), `${usage.percent.toFixed(1)}% (${formatTokens(usage.cacheRead)} / ${formatTokens(usage.billed)})`),
-              row(t('usageTtfb'), `${seconds(usage.ttfbMs)}s`),
-              row(t('usageTotal'), `${seconds(usage.totalMs)}s`),
-              usage.model ? row(t('model'), `${usage.provider} · ${usage.model}`) : null,
+              { className: 'sc-usage-detail' },
+              h('div', { className: 'sc-usage-title' }, t('usageTitle')),
+              h('div', { className: 'sc-usage-total' }, exact(total)),
+              row(t('usageCacheHit'), percent),
+              row(t('usageUncachedInput'), exact(usage.input)),
+              row(t('usageCacheReadLabel'), exact(usage.cacheRead)),
+              row(t('usageOutput'), exact(usage.output)),
+              usage.cacheWrite > 0 ? row(t('usageCacheWrite'), exact(usage.cacheWrite)) : null,
             )
           : null,
       )
@@ -956,6 +986,10 @@ window.__ModuleLoader__.load({
         const element = scrollRef.current
         if (element) element.scrollTop = element.scrollHeight
       }, [messages.length, live?.text, live?.reasoning, live?.tools?.length])
+
+      useEffect(() => {
+        loadModels()
+      }, [])
 
       // Closing the tab unmounts this body: that is the close, and the instance
       // must not outlive it.
@@ -1062,6 +1096,7 @@ window.__ModuleLoader__.load({
             )
           : null,
         notice ? h('div', { className: 'sc-notice' }, notice) : null,
+        state.notice ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.notice) : null,
         discussion
           ? h(
               'div',
@@ -1157,8 +1192,8 @@ window.__ModuleLoader__.load({
                         ),
                   ),
                 ),
-                h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: state.lastStats ?? EMPTY_STATS })),
               ),
+              h(UsagePills, { t, stats: state.lastStats ?? EMPTY_STATS }),
             )
           : null,
       )
