@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 
     let sidebar = null
+    /** Set while a confirmed close is in flight, so the handler does not re-ask. */
+    let closingConfirmed = false
     /** The main composer of each session, for "放入主会话草稿". */
     const draftTargets = new Map()
     const composing = new Set()
@@ -57,7 +59,7 @@ window.__ModuleLoader__.load({
       tools: '可用工具：{tools}',
       workspace: '工作区：{path}',
       starting: '正在准备临时会话…',
-      empty: '这是一个只读的临时会话：可以围绕主会话已完成的内容提问，模型只能读取工作区（read / glob / grep），不会修改任何东西，关闭后不保留。',
+      emptySimple: '这是一个临时会话，关闭后会清除所有信息。',
       placeholder: '提出讨论问题，Enter 发送，Shift+Enter 换行',
       send: '发送',
       stop: '停止回答',
@@ -114,7 +116,7 @@ window.__ModuleLoader__.load({
       tools: 'Tools: {tools}',
       workspace: 'Workspace: {path}',
       starting: 'Preparing the temporary session…',
-      empty: 'A read-only temporary session: ask about what the main session has completed. The model can only read the workspace (read / glob / grep), changes nothing, and nothing is kept when you close it.',
+      emptySimple: 'This is a temporary session. Closing it clears everything.',
       placeholder: 'Ask a question. Enter sends, Shift+Enter breaks the line',
       send: 'Send',
       stop: 'Stop answering',
@@ -427,6 +429,7 @@ window.__ModuleLoader__.load({
         return existing.discussion
       }
       if (existing.discussion) await closeDiscussion({ keepTab: true })
+      closingConfirmed = false
       const tag = `panel-${++openCounter}-${Date.now()}`
       store.set({
         status: 'creating',
@@ -716,6 +719,7 @@ window.__ModuleLoader__.load({
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
 .sc-facts{display:flex;flex-direction:column;gap:3px;max-width:340px;margin-top:6px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
 .sc-composer{flex:none;padding:0 12px 8px}
+.sc-usage-dock{flex:none;padding:0 20px 10px;display:flex;flex-direction:column;gap:6px}
 .sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
 .sc-input{box-sizing:border-box;width:100%;resize:none;min-height:36px;max-height:200px;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:4px 8px 0 14px}
 .sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
@@ -952,7 +956,6 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
-        message.stats ? h(UsagePills, { t, stats: message.stats }) : null,
       )
     }
 
@@ -977,7 +980,18 @@ window.__ModuleLoader__.load({
               { type: 'button', className: 'sc-btn primary', autoFocus: true, onClick: () => store.set({ closeConfirm: false }) },
               t('keepDiscussing'),
             ),
-            h('button', { type: 'button', className: 'sc-btn', onClick: () => closeDiscussion() }, t('closeAndClear')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'sc-btn',
+                onClick: () => {
+                  closingConfirmed = true
+                  closeDiscussion()
+                },
+              },
+              t('closeAndClear'),
+            ),
           ),
         ),
       )
@@ -1028,6 +1042,7 @@ window.__ModuleLoader__.load({
         }
       }
       const route = discussion?.route
+      const lastStats = [...messages].reverse().find((message) => message.stats)?.stats ?? live?.stats ?? null
 
       return h(
         'div',
@@ -1040,7 +1055,6 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'sc-head-row' },
             h('span', { className: 'sc-title' }, t('title')),
-            h('span', { className: 'sc-badge' }, t('badge')),
             h('span', { className: 'sc-grow' }),
             discussion
               ? h(
@@ -1058,7 +1072,6 @@ window.__ModuleLoader__.load({
                   ),
                 )
               : null,
-            h('button', { type: 'button', className: 'sc-iconBtn', title: t('close'), onClick: () => store.set({ closeConfirm: true }) }, '×'),
           ),
           discussion
             ? h(
@@ -1076,9 +1089,6 @@ window.__ModuleLoader__.load({
                   .filter(Boolean)
                   .join(' · '),
               )
-            : null,
-          discussion?.tools?.length
-            ? h('div', { className: 'sc-meta' }, fill(t('tools'), { tools: discussion.tools.join(' · ') }))
             : null,
         ),
         state.openError && state.status !== 'error' ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.openError) : null,
@@ -1132,19 +1142,7 @@ window.__ModuleLoader__.load({
                         opacity: 0.6,
                       }),
                     ),
-                    h('div', { className: 'sc-empty-title' }, t('title')),
-                    h('div', { className: 'sc-empty-desc' }, t('empty')),
-                    h(
-                      'div',
-                      { className: 'sc-facts' },
-                      h(
-                        'span',
-                        null,
-                        fill(t('inherited'), { turns: discussion.completedTurns, tokens: formatTokens(discussion.estimatedTokens) }),
-                      ),
-                      discussion.tools?.length ? h('span', null, fill(t('tools'), { tools: discussion.tools.join(' · ') })) : null,
-                      discussion.workspace ? h('span', null, fill(t('workspace'), { path: discussion.workspace })) : null,
-                    ),
+                    h('div', { className: 'sc-empty-title' }, t('emptySimple')),
                   )
                 : null,
               messages.map((message, index) =>
@@ -1254,6 +1252,7 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
+        discussion && lastStats ? h('div', { className: 'sc-usage-dock' }, h(UsagePills, { t, stats: lastStats })) : null,
         h(ConfirmDialog, { t }),
       )
     }
@@ -1315,13 +1314,12 @@ window.__ModuleLoader__.load({
       ctx.effect(
         () =>
           ctx.sidebarRight.registerCloseHandler(TAB_KIND, async () => {
-            const state = store.get()
-            if (state.closeConfirm) {
-              await closeDiscussion({ keepTab: true })
-              return
+            if (!closingConfirmed) {
+              store.set({ closeConfirm: true })
+              throw new Error('side-chat: close awaits confirmation')
             }
-            store.set({ closeConfirm: true })
-            throw new Error('side-chat: close awaits confirmation')
+            closingConfirmed = false
+            await closeDiscussion({ keepTab: true })
           }),
         'side-chat:close',
       )

@@ -245,20 +245,25 @@ await check('the panel renders the prepared discussion', () => {
   const tree = render(panel.component, { t: translate })
   const text = textOf(tree)
   assert.match(text, /临时会话/)
-  assert.match(text, /只读会话 · 关闭后清空/)
-  assert.match(text, /继承 3 轮/)
-  assert.match(text, /read · glob · grep/)
+  assert.match(text, /这是一个临时会话，关闭后会清除所有信息/)
+  assert.equal(text.includes('read · glob · grep'), false, 'no tools line in the chrome')
   assert.ok(find(tree, (element) => element.props?.className === 'sc-input'), 'the composer input')
 })
 
-await check('closing from the tab chrome asks first', async () => {
+await check('closing asks first, then closes', async () => {
   const handler = ctx.sidebarRight.closeHandler?.handler
   assert.ok(handler, 'a close handler is registered')
+  // An unconfirmed close is refused, which is what preserves the tab.
   await assert.rejects(() => handler(), /confirmation/)
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
-  assert.match(textOf(render(panel.component, { t: translate })), /关闭临时会话？/)
-  await handler()
+  const tree = render(panel.component, { t: translate })
+  assert.match(textOf(tree), /关闭临时会话？/)
+  const confirm = find(tree, (element) => element.type === 'button' && textOf(element) === '关闭并清空')
+  assert.ok(confirm, 'the dialog offers the confirmed close')
+  confirm.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 20))
   assert.ok(calls.some((call) => call.url.endsWith('/close')), 'the instance was closed once confirmed')
+  assert.deepEqual(openedTabs, ['side-chat', 'close:side-chat'])
 })
 
 await check('every rendered copy key exists in the dictionary', () => {
