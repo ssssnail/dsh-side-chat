@@ -48,6 +48,14 @@ function useEffect(fn, deps) {
   if (changed) pendingEffects.push(fn)
 }
 
+function useMemo(factory, deps) {
+  const slots = hookSlots
+  const index = hookIndex++
+  const previous = slots[index]
+  if (!previous || !deps || deps.some((value, position) => value !== previous.deps[position])) slots[index] = { value: factory(), deps }
+  return slots[index].value
+}
+
 const React = {
   createElement(type, props, ...children) {
     const resolved = { ...(props ?? {}) }
@@ -60,6 +68,13 @@ const React = {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
+}
+
+const markdownCalls = []
+function MarkdownText(props) {
+  markdownCalls.push(props)
+  return React.createElement('div', { 'data-native-markdown': true }, props.text)
 }
 
 let captured = null
@@ -73,6 +88,10 @@ globalThis.document = { addEventListener() {}, removeEventListener() {}, activeE
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async () => {} } } })
 
 const calls = []
+const copiedTexts = []
+navigator.clipboard.writeText = async (text) => { copiedTexts.push(text) }
+let sendResponse = null
+let responseFrames = [{ type: 'done', status: 'done', text: 'session-one-private-answer' }]
 let openResult = { ok: false, message: 'no script' }
 
 globalThis.fetch = async (url, options = {}) => {
@@ -86,9 +105,8 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url.endsWith('/send')) {
     const identity = JSON.parse(options.body)
-    const frame = { discussionId: identity.discussionId, requestId: identity.requestId,
-      type: 'done', status: 'done', text: 'session-one-private-answer' }
-    return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`)
+    if (sendResponse) return sendResponse(identity)
+    return new Response(responseFrames.map((frame) => `data: ${JSON.stringify({ ...frame, discussionId: identity.discussionId, requestId: identity.requestId })}\n\n`).join('') + 'data: [DONE]\n\n')
   }
   return new Response(JSON.stringify({ ok: true }), { status: 200 })
 }
@@ -125,6 +143,7 @@ const ctx = {
 
 const plugin = captured.factory((name) => {
   if (name === 'react') return React
+  if (name === '@deepseek-ai/dsh-client-ui-primitives') return { MarkdownText }
   throw new Error(`unexpected require(${name})`)
 })
 plugin.apply(ctx)
@@ -260,6 +279,24 @@ await check('the panel renders the prepared discussion', () => {
   assert.ok(find(tree, (element) => element.props?.className === 'sc-input'), 'the composer input')
 })
 
+await check('multiline input grows, caps its height and shrinks after clearing', () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  let tree = render(panel.component, panelProps)
+  const geometry = { style: {}, scrollHeight: 112, focus() {} }
+  find(tree, element => element.type === 'textarea').props.ref.current = geometry
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'first\nsecond\nthird' } })
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.style.height, '112px')
+  geometry.scrollHeight = 300
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'many lines' } })
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.style.height, '180px')
+  geometry.scrollHeight = 20
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: '' } })
+  render(panel.component, panelProps)
+  assert.equal(geometry.style.height, '36px')
+})
+
 await check('another session tab cannot display or control the discussion transcript', async () => {
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
   let tree = render(panel.component, panelProps)
@@ -272,6 +309,166 @@ await check('another session tab cannot display or control the discussion transc
   assert.equal(textOf(another).includes('session-one-private'), false)
   assert.equal(find(another, (element) => element.type === 'textarea'), undefined)
   assert.equal(ctx.sidebarRight.closeHandler.handler('session-2'), undefined)
+})
+
+await check('native Markdown receives raw text, completed status and stable localized labels', async () => {
+  const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
+  const markdown = '# 标题\n\n| 项目 | 状态 |\n| --- | --- |\n| **检查** | 完成 |\n\n```js\nconst answer = 42\n```'
+  responseFrames = [{ type: 'text', text: markdown }, { type: 'done', status: 'done' }]
+  let tree = render(panel.component, panelProps)
+  find(tree, (element) => element.type === 'textarea').props.onChange({ target: { value: 'render-markdown' } })
+  tree = render(panel.component, panelProps)
+  find(tree, (element) => element.type === 'button' && element.props?.title === '发送').props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  tree = render(panel.component, panelProps)
+  const rendered = markdownCalls.at(-1)
+  assert.equal(rendered.text, markdown, 'no escaping or regex rewriting before the native renderer')
+  assert.equal(rendered.streaming, false)
+  assert.deepEqual(rendered.labels, { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' })
+  render(panel.component, panelProps)
+  assert.equal(markdownCalls.at(-1).labels, rendered.labels, 'unchanged locale preserves renderer cache')
+  const buttons = []
+  function collect(element) {
+    if (!element || typeof element !== 'object') return
+    if (Array.isArray(element)) return element.forEach(collect)
+    if (element.type === 'button' && textOf(element) === '复制') buttons.push(element)
+    collect(element.props?.children)
+  }
+  collect(tree)
+  await buttons.at(-1).props.onClick()
+  assert.equal(copiedTexts.at(-1), markdown, 'copy preserves the original Markdown')
+})
+
+await check('answer actions expose clear labels and import only one answer into the existing draft', async () => {
+  const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
+  const entry = registrations.find((item) => item.options.name === 'conversation.input.left')
+  const writes = []
+  render(entry.component, { sessionId: 'session-1', inputActions: { setDraft(text) { writes.push(text) } },
+    useInput: selector => selector({ draft: '原有主会话草稿' }), t: translate })
+  let tree = render(panel.component, panelProps)
+  const toolbar = find(tree, element => element.props?.className === 'sc-answer-toolbar')
+  assert.equal(toolbar.props.role, 'group')
+  assert.equal(toolbar.props['aria-label'], '回答操作')
+  const button = find(tree, element => element.props?.['data-action'] === 'draft')
+  assert.equal(button.props['aria-label'], '导入到主会话')
+  assert.match(button.props.title, /草稿.*不会自动发送/)
+  assert.ok(find(button, element => element.type === 'svg'), 'the action has a visible icon')
+  const before = calls.filter(call => call.url.endsWith('/send')).length
+  await Promise.all([button.props.onClick(), button.props.onClick()])
+  assert.equal(writes.length, 1, 'rapid double clicks do not duplicate the draft insertion')
+  assert.equal(writes[0], '原有主会话草稿\n\n---\n\nsession-one-private-answer', 'imports the clicked answer, not the whole discussion')
+  assert.equal(calls.filter(call => call.url.endsWith('/send')).length, before, 'import never sends a message')
+  tree = render(panel.component, panelProps)
+  const imported = find(tree, element => element.props?.['data-action'] === 'draft')
+  assert.equal(imported.props['data-feedback'], true)
+  assert.match(textOf(imported), /已加入草稿/)
+})
+
+await check('clipboard failure is visible and leaves answer actions usable', async () => {
+  const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
+  const original = navigator.clipboard.writeText
+  navigator.clipboard.writeText = async () => { throw new Error('clipboard denied') }
+  try {
+    const tree = render(panel.component, panelProps)
+    await find(tree, element => element.props?.['data-action'] === 'copy').props.onClick()
+    const after = render(panel.component, panelProps)
+    assert.match(textOf(after), /复制失败，请重试/)
+    assert.equal(find(after, element => element.props?.['data-action'] === 'copy').props.disabled, false)
+  } finally { navigator.clipboard.writeText = original }
+})
+
+await check('streaming respects reader scroll intent and tool details default to collapsed', async () => {
+  const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
+  let tree = render(panel.component, panelProps)
+  const geometry = { scrollHeight: 1400, clientHeight: 300, scrollTop: 0 }
+  find(tree, (element) => element.props?.className === 'sc-scroll').props.ref.current = geometry
+  let enqueue, end
+  sendResponse = (identity) => new Response(new ReadableStream({ start(controller) {
+    enqueue = (frame) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...frame, discussionId: identity.discussionId, requestId: identity.requestId })}\n\n`))
+    end = () => controller.close()
+  } }))
+  find(tree, (element) => element.type === 'textarea').props.onChange({ target: { value: 'scroll-test' } })
+  tree = render(panel.component, panelProps)
+  find(tree, (element) => element.type === 'button' && element.props?.title === '发送').props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.scrollTop, geometry.scrollHeight, 'new turn starts following')
+  let scroller = find(tree, (element) => element.props?.className === 'sc-scroll')
+  scroller.props.onWheel({ deltaY: -100 })
+  geometry.scrollTop = 500
+  scroller.props.onScroll({ currentTarget: geometry })
+  enqueue({ type: 'text', text: 'streaming-body' })
+  enqueue({ type: 'tool', name: 'bash', status: 'running' })
+  enqueue({ type: 'tool', name: 'bash', status: 'error', text: '只读范围拒绝' })
+  enqueue({ type: 'notice', message: '过程提示' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  geometry.scrollHeight = 1800
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.scrollTop, 500, 'new tokens and notices must not drag reader down')
+  const tool = find(tree, (element) => element.type === 'details' && element.props?.className.includes('sc-tool-details'))
+  assert.ok(tool)
+  assert.equal(tool.props.open, undefined, 'tool result starts collapsed')
+  assert.equal(tool.props['data-status'], 'error', 'failure is still visible in the summary')
+  const latest = find(tree, element => element.props?.className === 'sc-latest')
+  assert.ok(latest, 'scrolling away exposes the return button')
+  latest.props.onClick()
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.scrollTop, geometry.scrollHeight)
+  assert.equal(find(tree, element => element.props?.className === 'sc-latest'), undefined)
+  enqueue({ type: 'text', text: '-continued' })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  geometry.scrollHeight = 2000
+  tree = render(panel.component, panelProps)
+  assert.equal(geometry.scrollTop, geometry.scrollHeight, 'returning to bottom resumes following')
+  assert.equal(textOf(tree).includes('过程提示'), false)
+  enqueue({ type: 'done', status: 'done' }); end()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  sendResponse = null
+})
+
+await check('query prose folds into exploration notes and actions use the final answer only', async () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  responseFrames = [
+    { type: 'step', step: 1 }, { type: 'text', text: '我先读取配置。' },
+    { type: 'step', step: 2 }, { type: 'text', text: '**最终结论**' },
+    { type: 'done', status: 'done', text: '**最终结论**', process: ['我先读取配置。'] },
+  ]
+  let tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'final-only' } })
+  tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'button' && element.props.title === '发送').props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  tree = render(panel.component, panelProps)
+  const process = find(tree, element => element.props?.className === 'sc-process')
+  assert.ok(process)
+  assert.equal(process.props.open, undefined)
+  assert.match(textOf(process), /我先读取配置/)
+  const all = []
+  function collect(element) {
+    if (!element || typeof element !== 'object') return
+    if (Array.isArray(element)) return element.forEach(collect)
+    if (element.props?.['data-action'] === 'copy') all.push(element)
+    collect(element.props?.children)
+  }
+  collect(tree)
+  await all.at(-1).props.onClick()
+  assert.equal(copiedTexts.at(-1), '**最终结论**')
+})
+
+await check('failed answers can return the original question to the input without sending', async () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  responseFrames = [{ type: 'error', message: '服务暂不可用' }, { type: 'done', status: 'error', text: '' }]
+  let tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'recover-this-question' } })
+  tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'button' && element.props.title === '发送').props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  tree = render(panel.component, panelProps)
+  const before = calls.filter(call => call.url.endsWith('/send')).length
+  find(tree, element => element.type === 'button' && textOf(element) === '重新编辑问题').props.onClick()
+  tree = render(panel.component, panelProps)
+  assert.equal(find(tree, element => element.type === 'textarea').props.value, 'recover-this-question')
+  assert.equal(calls.filter(call => call.url.endsWith('/send')).length, before)
 })
 
 await check('tab close asks first, cancel preserves the discussion, confirm clears it', async () => {
@@ -291,6 +488,27 @@ await check('tab close asks first, cancel preserves the discussion, confirm clea
   assert.equal(ctx.sidebarRight.closeHandler.handler('session-1'), undefined, 'confirmed removal can proceed')
 })
 
+await check('lost state offers a new discussion and failed opening offers retry', async () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  let tree = render(panel.component, panelProps)
+  tree = render(panel.component, panelProps)
+  assert.equal(find(tree, element => element.type === 'textarea'), undefined)
+  assert.match(textOf(tree), /历史不会保留/)
+  const prepared = openResult
+  openResult = { ok: false, message: '临时连接失败' }
+  await find(tree, element => element.type === 'button' && textOf(element) === '重新打开讨论').props.onClick()
+  tree = render(panel.component, panelProps)
+  assert.match(textOf(tree), /临时连接失败/)
+  const retry = find(tree, element => element.type === 'button' && textOf(element) === '重试打开')
+  assert.ok(retry)
+  openResult = { ...prepared, discussion: { ...prepared.discussion, discussionId: 'd2' } }
+  await retry.props.onClick()
+  tree = render(panel.component, panelProps)
+  tree = render(panel.component, panelProps)
+  assert.equal(find(tree, element => element.type === 'textarea').props.value, '', 'a fresh discussion does not retain the old draft')
+  assert.equal(textOf(tree).includes('recover-this-question'), false, 'old history has been cleared')
+})
+
 await check('every rendered copy key exists in the dictionary', () => {
   assert.deepEqual([...missingKeys], [], 'no missing locale keys')
 })
@@ -299,6 +517,8 @@ await check('every rendered copy key exists in the dictionary', () => {
 await check('the bundle has no dangling component reference', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   const defined = new Set([...source.matchAll(/function ([A-Z][A-Za-z0-9]+)\(/g)].map((m) => m[1]))
+  assert.match(source, /const \{ MarkdownText \} = require\('@deepseek-ai\/dsh-client-ui-primitives'\)/, 'uses the public renderer module')
+  defined.add('MarkdownText')
   const used = new Set([...source.matchAll(/\bh\(([A-Z][A-Za-z0-9]+)[,)]/g)].map((m) => m[1]))
   const dangling = [...used].filter((name) => !defined.has(name))
   assert.deepEqual(dangling, [], `h() references components that are not defined: ${dangling.join(', ')}`)

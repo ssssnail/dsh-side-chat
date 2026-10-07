@@ -16,12 +16,12 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { discussionInstruction, DISCUSSION_RULES } from './prompt.js'
+import { discussionInstruction, DISCUSSION_RULES, FINAL_ANSWER_INSTRUCTION } from './prompt.js'
 import { captureSnapshot } from './snapshot.js'
 import { createReadOnlyToolbox, READ_ONLY_TOOL_NAMES } from './readonly-tools.js'
 
-/** Maximum tool rounds inside one discussion turn before the loop is cut short. */
-const MAX_TOOL_ROUNDS = 4
+/** Whole-turn backstop; successful file exploration has no small round cap. */
+const TURN_TIMEOUT_MS = 10 * 60 * 1000
 /** Consecutive all-failed tool rounds tolerated before the turn is ended. */
 const MAX_FAILED_ROUNDS = 2
 /** Consecutive all-refused rounds tolerated before the turn is closed. */
@@ -37,6 +37,7 @@ const COMPACT_KEEP_TURNS = 2
 export function createDiscussionRuntime(ctx, options = {}) {
   const log = typeof options.log === 'function' ? options.log : () => {}
   const toolsEnabled = options.tools !== false
+  const turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS
   /** @type {Map<string, object>} */
   const discussions = new Map()
 
@@ -46,7 +47,9 @@ export function createDiscussionRuntime(ctx, options = {}) {
     const parentSessionId = String(input.parentSessionId ?? '')
     if (!parentSessionId) throw new Error('缺少 parentSessionId。')
 
+    const openedAt = performance.now()
     const snapshot = await captureSnapshot(ctx, parentSessionId, log)
+    const snapshotMs = performance.now() - openedAt
     if (!snapshot.ok) {
       const error = new Error(snapshot.message)
       error.code = snapshot.code
@@ -63,6 +66,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       }
     }
 
+    const toolboxMs = performance.now() - openedAt - snapshotMs
     const id = `discussion-${randomUUID()}`
     const instruction = discussionInstruction(snapshot, {
       parentLabel: snapshot.parentLabel,
@@ -70,16 +74,12 @@ export function createDiscussionRuntime(ctx, options = {}) {
       workspace: toolbox?.workspace ?? snapshot.cwd,
       toolNames: toolbox ? [...READ_ONLY_TOOL_NAMES] : [],
     })
-    const instructionMessage = message('developer', instruction, { kind: 'side-chat' })
+    const instructionMessage = message('system', instruction, { kind: 'system-prompt' })
 
-    // The discussion has a real memory Session for event and usage records.
-    // It is created OUTSIDE the agent
-    // lifecycle (prepare + enter + announce), which the session store documents
-    // as persisting nothing: no log writer is ever attached. `detach` removes it
-    // from the store again, so closing the discussion destroys it.
+    // Private memory Session: retain validated event/usage records without
+    // entering the shared store or triggering catalog/persistence listeners.
     let sessionId = `discussion-${randomUUID()}`
     let session
-    let detachSession
     let seededTurnNumber = 0
     try {
       const parent = ctx.get('sessions')?.get(parentSessionId)
@@ -97,17 +97,15 @@ export function createDiscussionRuntime(ctx, options = {}) {
           isSeeded: true,
         },
       })
-      detachSession = ctx.sessions.enter(prepared)
-      ctx.sessions.announce(prepared)
+      // A prepared Session can append and project locally without publication.
+      // Enter/announce would expose the temporary record in the main catalog.
       session = prepared
       log({ stage: 'session', discussionId: id, sessionId, seeded: seed.length })
     } catch (error) {
-      // Without a Session the discussion still runs over its own event stream;
-      // only the reused chat components are unavailable.
+      // The private event record is optional; the isolated request and SSE
+      // transcript still work if this installed Session contract is unavailable.
       log({ stage: 'session-failed', error: String(error?.message ?? error) })
-      detachSession?.()
       session = undefined
-      detachSession = undefined
       sessionId = undefined
     }
 
@@ -121,7 +119,6 @@ export function createDiscussionRuntime(ctx, options = {}) {
       rules: instructionMessage,
       session,
       sessionId,
-      detachSession,
       // Continue the seeded turn numbering: the parent's turns are 1..N in the
       // Session's own log, so restarting at 1 would collide in the transcript.
       turn: seededTurnNumber,
@@ -150,7 +147,10 @@ export function createDiscussionRuntime(ctx, options = {}) {
       closed: false,
     }
     discussions.set(id, discussion)
-    log({ stage: 'open', discussionId: id, parentSessionId, turns: snapshot.completedTurns })
+    log({ stage: 'open', discussionId: id, parentSessionId, turns: snapshot.completedTurns,
+      snapshotMs: Math.round(snapshotMs), toolboxMs: Math.round(toolboxMs),
+      sessionMs: Math.round(performance.now() - openedAt - snapshotMs - toolboxMs),
+      totalMs: Math.round(performance.now() - openedAt) })
     return view(discussion)
   }
 
@@ -169,12 +169,6 @@ export function createDiscussionRuntime(ctx, options = {}) {
     discussion.summary = []
     discussion.turns = []
     discussion.toolbox = null
-    try {
-      discussion.detachSession?.()
-    } catch (error) {
-      log({ stage: 'detach', error: String(error?.message ?? error) })
-    }
-    discussion.detachSession = undefined
     discussion.session = undefined
     discussions.delete(discussionId)
     log({ stage: 'close', discussionId })
@@ -290,6 +284,12 @@ export function createDiscussionRuntime(ctx, options = {}) {
     }
 
     const startedAt = Date.now()
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      controller.abort(new Error('讨论回答超时，已停止。可以缩小问题后继续。'))
+    }, turnTimeoutMs)
+    timeout.unref?.()
     const stats = {
       provider: route.provider,
       model: route.model,
@@ -307,12 +307,16 @@ export function createDiscussionRuntime(ctx, options = {}) {
     let firstTokenAt = 0
     const parts = []
     let streamError = null
+    let activeText = ''
+    let activeRecords = []
+    let activeCommitted = false
+    const roundSummaries = []
 
     const session = discussion.session
     const turnNumber = (discussion.turn ?? 0) + 1
     discussion.turn = turnNumber
     // Tool calls of the current step that have no result yet. A turn can stop
-    // between the two (user stop, round cap, a refusal), and a provider rejects
+    // between the two (user stop, timeout, a refusal), and a provider rejects
     // a history whose assistant tool call is unanswered, so they are closed in
     // the finally block below.
     let unresolved = []
@@ -323,7 +327,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       if (session) {
         appendSafe(session, 'turn/start', { turn: turnNumber }, undefined, log)
         if (!discussion.instructionAppended) {
-          appendSafe(session, 'developer/message', { turn: turnNumber, step: 1, message: discussion.rules }, { surfaceOp: 'append' }, log)
+          appendSafe(session, 'system/message', { turn: turnNumber, step: 1, message: discussion.rules }, { surfaceOp: 'append' }, log)
           discussion.instructionAppended = true
         }
         appendSafe(
@@ -335,14 +339,28 @@ export function createDiscussionRuntime(ctx, options = {}) {
         )
       }
       const messages = messagesFor(discussion, questionMessage)
-      // One signature per call that has already failed, so an identical retry
+      // One signature per call that has failed in this turn, so an identical retry
       // is refused instead of executed again.
-      const failedCalls = discussion.failedCalls ?? (discussion.failedCalls = new Set())
+      const failedCalls = new Set()
       let failedRounds = 0
       let refusedRounds = 0
+      let finalReason = null
+      const finishWithAnswer = (reason) => {
+        finalReason = reason
+        emit({ type: 'notice', level: 'warn', message: '正在根据已有信息整理回答。' })
+        // Request-local only: this instruction must not disable tools in later turns.
+        messages.push(message('system', `${FINAL_ANSWER_INSTRUCTION}\n原因：${reason}`, { kind: 'system-prompt' }))
+      }
       for (let round = 0; ; round += 1) {
+        if (controller.signal.aborted) {
+          turn.status = 'stopped'
+          break
+        }
         discussion.steps += 1
         const step = round + 1
+        activeText = ''
+        activeCommitted = false
+        emit({ type: 'step', step })
         if (session && openStep) {
           appendSafe(session, 'step/end', { turn: turnNumber, step: openStep }, undefined, log)
           openStep = 0
@@ -351,10 +369,14 @@ export function createDiscussionRuntime(ctx, options = {}) {
           appendSafe(session, 'step/start', { turn: turnNumber, step }, undefined, log)
           openStep = step
         }
+        const offeredTools = discussion.toolbox && !finalReason ? discussion.toolbox.schemas : undefined
+        if (session && finalReason) {
+          appendSafe(session, 'system/message', { turn: turnNumber, step, message: messages.at(-1) }, { surfaceOp: 'append' }, log)
+        }
         if (session) {
-          const headerKey = `${route.provider}/${route.model}/${route.reasoningEffort ?? ''}/${discussion.toolbox ? 'tools' : 'none'}`
+          const headerKey = `${route.provider}/${route.model}/${route.reasoningEffort ?? ''}/${offeredTools ? 'tools' : 'none'}`
           if (discussion.headerKey !== headerKey) {
-            const tools = discussion.toolbox ? [...discussion.toolbox.schemas] : undefined
+            const tools = offeredTools ? [...offeredTools] : undefined
             appendSafe(
               session,
               'request/header',
@@ -376,9 +398,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
             discussion.headerKey = headerKey
           }
         }
-        const attempt = session ? createLiveAttempt(ctx, session, turnNumber, step, discussion, log) : undefined
-        if (attempt) attempt.start()
-        const records = []
+        const records = activeRecords = []
         const request = {
           provider: route.provider,
           model: route.model,
@@ -388,7 +408,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
           signal: controller.signal,
         }
         if (route.reasoningEffort) request.reasoningEffort = route.reasoningEffort
-        if (discussion.toolbox) request.tools = discussion.toolbox.schemas
+        if (offeredTools) request.tools = offeredTools
 
         const blocks = new Map()
         let finish = null
@@ -397,7 +417,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
 
         const stream = ctx.llm.stream(request)
         for await (const chunk of stream) {
-          if (attempt) attempt.push(chunk)
+          if (controller.signal.aborted) throw controller.signal.reason
           records.push({ type: 'chunk', time: Date.now(), chunk })
           if (chunk.type === 'text-delta') {
             if (firstTokenAt === 0) {
@@ -405,6 +425,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
               stats.ttfbMs = firstTokenAt - startedAt
             }
             roundText += chunk.text
+            activeText += chunk.text
             pushText(parts, chunk.text)
             emit({ type: 'text', text: chunk.text })
             continue
@@ -442,12 +463,14 @@ export function createDiscussionRuntime(ctx, options = {}) {
           source: { kind: 'model', provider: route.provider, model: route.model },
           content,
         }
+        activeText = content.filter(block => block?.type === 'text').map(block => block.text ?? '').join('\n\n') || roundText
+        roundSummaries.push(activeText)
+        activeCommitted = true
         turn.answerMessages.push(assistant)
         messages.push(assistant)
         const stoppedHere = finish?.kind === 'aborted'
-        const failedHere = finish?.kind === 'error'
         if (session) {
-          const committed = appendSafe(
+          appendSafe(
             session,
             'assistant/message',
             {
@@ -468,12 +491,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
             { surfaceOp: 'append' },
             log,
           )
-          if (attempt) {
-            if (committed) attempt.end({ kind: 'committed', eventType: 'assistant/message', seq: committed.seq })
-            else attempt.end({ kind: 'abandoned' })
-          }
         }
-
 
         const toolCalls = content.filter((block) => block?.type === 'tool-call')
         unresolved = toolCalls.map((call) => call.id)
@@ -490,20 +508,25 @@ export function createDiscussionRuntime(ctx, options = {}) {
           break
         }
         if (toolCalls.length === 0) {
-          turn.status = 'done'
+          if (!content.some(block => block.type === 'text' && block.text?.trim())) {
+            streamError = new Error(finalReason
+              ? '未能生成完整答复；本次核查未完成，尚未取得的信息不能视为已验证。'
+              : '模型未返回回答正文，可以重新编辑问题后重试。')
+            turn.status = 'error'
+            emit({ type: 'error', message: streamError.message })
+          } else {
+            turn.status = 'done'
+          }
           break
         }
-        if (!discussion.toolbox || round >= MAX_TOOL_ROUNDS) {
-          emit({
-            type: 'notice',
-            level: 'warn',
-            message: discussion.toolbox
-              ? `工具调用轮次已达上限（${MAX_TOOL_ROUNDS}），本轮结束。`
-              : '本次讨论未开放工具，已忽略模型提出的工具调用。',
-          })
-          turn.status = 'done'
+        if (finalReason) {
+          // Never dispatch a call from the one text-only finishing request.
+          streamError = new Error('模型仍尝试调用工具，未能完成答复；这些调用未执行，本次核查未完成。')
+          turn.status = 'error'
+          emit({ type: 'error', message: streamError.message })
           break
         }
+        const blockedReason = !discussion.toolbox ? '本次讨论未开放工具。' : null
         let roundFailures = 0
         let roundRefusals = 0
         let roundRepeats = 0
@@ -511,8 +534,11 @@ export function createDiscussionRuntime(ctx, options = {}) {
           stats.toolCalls += 1
           const signature = `${call.name}\u0000${call.arguments ?? ''}`
           emit({ type: 'tool', name: call.name, status: 'running' })
+          if (controller.signal.aborted) { turn.status = 'stopped'; break }
           let result
-          if (failedCalls.has(signature)) {
+          if (blockedReason) {
+            result = { text: `${blockedReason} ${FINAL_ANSWER_INSTRUCTION}`, isError: true, refused: true }
+          } else if (failedCalls.has(signature)) {
             // The exact call already failed in this discussion; repeating it
             // cannot produce a different answer, so it is refused rather than
             // re-run. This is what stops a failing tool from becoming a loop.
@@ -568,42 +594,28 @@ export function createDiscussionRuntime(ctx, options = {}) {
           }
         }
         if (turn.status === 'stopped') break
-        // Every call in this round hit a capability boundary (a tool this
-        // session does not declare, or a path outside the workspace). Asking the
-        // model again cannot help, so the turn ends with a professional notice
-        // instead of a retry loop.
+        if (blockedReason) {
+          finishWithAnswer(blockedReason)
+          continue
+        }
         if (roundRepeats > 0 && roundRepeats === toolCalls.length) {
-          emit({ type: 'notice', level: 'warn', message: '同一调用已失败过，不再重复执行，本轮结束。' })
-          turn.status = 'done'
-          break
+          finishWithAnswer('同一调用已失败过，不再重复执行。')
+          continue
         }
         if (roundRefusals > 0 && roundRefusals === toolCalls.length) {
-          // The model usually imitates the parent history's tools. Refuse, tell
-          // it what this session actually has, and let it try once more before
-          // the turn is closed.
+          // Actionable recovery advice is in the tool result, not just the UI notice.
           refusedRounds += 1
           if (refusedRounds >= MAX_REFUSED_ROUNDS) {
-            emit({ type: 'notice', level: 'warn', message: '已按只读范围拒绝这些调用，本轮结束。' })
-            turn.status = 'done'
-            break
+            finishWithAnswer('工具调用连续超出只读范围，已停止工具尝试。')
+          } else {
+            emit({ type: 'notice', level: 'warn', message: '正在改用只读工具继续核查。' })
           }
-          emit({
-            type: 'notice',
-            level: 'warn',
-            message: '这些工具不在本次只读会话里；请改用 read、glob 或 grep 重新获取信息，或直接回答。',
-          })
           continue
         }
         refusedRounds = 0
         failedRounds = roundFailures === toolCalls.length ? failedRounds + 1 : 0
         if (failedRounds >= MAX_FAILED_ROUNDS) {
-          emit({
-            type: 'notice',
-            level: 'warn',
-            message: '只读工具连续失败，已结束本轮：请直接说明结论或缺少的信息。',
-          })
-          turn.status = 'done'
-          break
+          finishWithAnswer('只读工具连续失败，已停止工具尝试。')
         }
       }
     } catch (error) {
@@ -616,8 +628,30 @@ export function createDiscussionRuntime(ctx, options = {}) {
       }
       log({ stage: 'send', discussionId: discussion.id, error: String(error?.message ?? error) })
     } finally {
+      clearTimeout(timeout)
+      if (timedOut && !discussion.closed) {
+        streamError = new Error('讨论回答超时，已停止。可以缩小问题后继续。')
+        streamError.code = 'discussion-timeout'
+        turn.status = 'error'
+        emit({ type: 'error', message: streamError.message, code: streamError.code })
+      }
+      // Keep visible partial prose in later discussion context after a transport
+      // error/abort, without inventing or dispatching any incomplete tool call.
+      if (!activeCommitted && activeText.trim()) {
+        const partial = {
+          id: newId(), role: 'assistant',
+          source: { kind: 'model', provider: route.provider, model: route.model },
+          content: [{ type: 'text', text: activeText }],
+        }
+        turn.answerMessages.push(partial)
+        appendSafe(session, 'assistant/message', {
+          turn: turnNumber, step: openStep || unresolvedStep, message: partial,
+          stream: activeRecords, interrupted: true,
+        }, { surfaceOp: 'append' }, log)
+      }
       stats.totalMs = Date.now() - startedAt
-      turn.text = collectText(turn.answerMessages, parts)
+      turn.text = activeText
+      turn.process = (activeCommitted ? roundSummaries.slice(0, -1) : roundSummaries).filter(text => text.trim())
       turn.stats = stats
       discussion.stats.push(stats)
       discussion.turns.push(turn)
@@ -671,6 +705,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
       steps: discussion.steps,
       status: turn.status,
       text: turn.text,
+      process: turn.process,
       parts: parts.map((part) => ({ ...part })),
       stats: { ...stats },
       ...(streamError ? { message: streamError.message } : {}),
@@ -721,7 +756,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
 
     const transcript = [
       ...discussion.summary.map((entry) => entry.content.map((block) => block.text ?? '').join('')),
-      ...older.map((turn) => `【讨论问题】\n${turn.question}\n\n【讨论回答】\n${turn.text}`),
+      ...older.map((turn) => `【讨论问题】\n${turn.question}\n\n【查阅过程】\n${(turn.process ?? []).join('\n\n')}\n\n【讨论回答】\n${turn.text}`),
     ].join('\n\n---\n\n')
     const controller = new AbortController()
     const operation = { requestId: `compact-${randomUUID()}`, controller }
@@ -732,7 +767,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
         provider: route.provider,
         model: route.model,
         messages: [
-          message('developer', DISCUSSION_RULES, { kind: 'side-chat' }),
+          message('system', DISCUSSION_RULES, { kind: 'system-prompt' }),
           {
             role: 'user',
             content: [
@@ -763,7 +798,7 @@ export function createDiscussionRuntime(ctx, options = {}) {
     if (!summary.trim()) return { ok: false, message: '压缩没有产生摘要。' }
 
     discussion.summary = [
-      message('developer', `【较早的临时讨论摘要（已压缩）】\n${summary.trim()}`, { kind: 'side-chat' }),
+      message('user', `【较早的临时讨论摘要（已压缩，仅供参考）】\n${summary.trim()}`, { kind: 'side-chat' }),
     ]
     discussion.turns = keep
     log({ stage: 'compact', discussionId, compressedTurns: older.length, keptTurns: keep.length })
@@ -828,36 +863,6 @@ function appendSafe(session, type, data, intent, log) {
   } catch (error) {
     log?.({ stage: 'append', type, error: String(error?.message ?? error) })
     return undefined
-  }
-}
-
-/**
- * The live attempt frames the agent loop publishes (`agent/assistant-stream`):
- * `{type:'start'|'chunk'|'end', attemptId, revision, index, turn, step, chunk}`.
- * The client turns them into `assistant/live-chunk`, which is what makes an
- * answer stream token by token into the real chat components.
- */
-function createLiveAttempt(ctx, session, turn, step, discussion, log) {
-  const attemptId = `${session.id}:${(discussion.attemptCounter = (discussion.attemptCounter ?? 0) + 1)}`
-  let revision = 0
-  let index = 0
-  const emitFrame = (frame) => {
-    try {
-      ctx.emit('agent/assistant-stream', { frame })
-    } catch (error) {
-      log?.({ stage: 'live-frame', error: String(error?.message ?? error) })
-    }
-  }
-  return {
-    start() {
-      emitFrame({ type: 'start', attemptId, revision: revision++, turn, step })
-    },
-    push(chunk) {
-      emitFrame({ type: 'chunk', attemptId, revision: revision++, index: index++, time: Date.now(), chunk })
-    },
-    end(outcome) {
-      emitFrame({ type: 'end', attemptId, revision: revision++, index, outcome })
-    },
   }
 }
 
@@ -943,23 +948,6 @@ function pushText(parts, text) {
   const last = parts[parts.length - 1]
   if (last && last.kind === 'text') last.text += text
   else parts.push({ kind: 'text', text })
-}
-
-/** The user-facing answer body: every text block produced across tool rounds. */
-function collectText(answerMessages, parts) {
-  const fromParts = parts
-    .filter((part) => part.kind === 'text')
-    .map((part) => part.text)
-    .join('')
-  if (fromParts.trim()) return fromParts
-  const blocks = []
-  for (const answer of answerMessages) {
-    if (answer.role !== 'assistant') continue
-    for (const block of answer.content ?? []) {
-      if (block?.type === 'text' && block.text) blocks.push(block.text)
-    }
-  }
-  return blocks.join('')
 }
 
 function absorbUsage(stats, usage) {

@@ -9,6 +9,8 @@
 
 import assert from 'node:assert/strict'
 import { apply } from '../index.js'
+import { createDiscussionRuntime } from '../host/runtime.js'
+import { FINAL_ANSWER_INSTRUCTION } from '../host/prompt.js'
 
 /* ------------------------------------------------------------------ fake session */
 
@@ -49,7 +51,7 @@ function projectFixtureEvent(event) {
       source: { kind: 'model', provider: 'fake', model: 'fake-1' },
     }
   }
-  if (event.type === 'developer/message') return event.data.message
+  if (event.type === 'developer/message' || event.type === 'system/message') return event.data.message
   return null
 }
 
@@ -268,7 +270,10 @@ function assertProviderAcceptable(history, label) {
       buffered.push({ role: 'system', content: message.content })
       continue
     }
-    if (message.role === 'system') continue
+    if (message.role === 'system') {
+      if (wire.length > 0) buffered.push({ role: 'system', content: message.content })
+      continue
+    }
     if (message.role === 'assistant') flush()
     const role = message.role === 'tool' ? 'user' : message.role
     const content =
@@ -309,6 +314,7 @@ function assertProviderAcceptable(history, label) {
 
 /** Sessions the plugin creates for a discussion, with everything appended. */
 const discussionSessions = new Map()
+const preparedSessions = new Map()
 /** The Session a discussion instance created, for assertions. */
 function createdSessionFor(discussionId) {
   for (const created of discussionSessions.values()) if (created.discussionId === discussionId) return created
@@ -366,6 +372,7 @@ const ctx = {
     prepare: (id, options) => {
       const created = makeDiscussionSession(id, options?.seed ?? [])
       created.prepared = true
+      preparedSessions.set(id, created)
       return created
     },
     enter: (prepared) => {
@@ -550,13 +557,14 @@ await check('streams a read-only tool round and a final answer', async () => {
   // The second request inherited the first round's tool result and the instruction.
   const followUp = llm.requests.at(-1)
   assert.ok(followUp.messages.some((message) => message.role === 'tool'), 'tool result kept in history')
-  assert.ok(followUp.messages.some((message) => message.role === 'developer'), 'discussion instruction present')
+  assert.ok(followUp.messages.some((message) => message.role === 'system' && message.content.some(block => block.text?.includes('你是临时讨论助手'))), 'full discussion instruction present')
   assert.equal(followUp.messages.some((message) => message.type === 'text' && /未完成的问题/.test(message.text ?? '')), false)
   assert.equal(followUp.sessionId, undefined, 'never binds a session id')
 })
 
-await check('rejects a path outside the workspace and closes the turn', async () => {
+await check('refuses a path outside the workspace and still answers', async () => {
   llm.queue(() => escapeStream())
+  llm.queue(() => textStream(['工作区外的文件未读取，无法核实其内容。'], {}))
   const before = llm.requests.length
   const result = await call('POST', '/side-chat/send', {
     discussionId: globalThis.discussionId,
@@ -570,19 +578,20 @@ await check('rejects a path outside the workspace and closes the turn', async ()
   assert.match(toolFrames.at(-1).text, /不在本次会话可访问的工作区内/)
   assert.match(toolFrames.at(-1).text, /可访问范围：/)
   assert.ok(
-    result.frames.some((frame) => frame.type === 'notice' && /请改用 read、glob 或 grep/.test(frame.message ?? '')),
+    result.frames.some((frame) => frame.type === 'notice' && /正在改用只读工具/.test(frame.message ?? '')),
     'the refusal invites another attempt with the read-only tools',
   )
-  // One more provider request: the model is given exactly one chance to adapt,
-  // and the turn only closes when the next round is refused too.
+  assert.equal(result.frames.at(-1).status, 'done')
+  assert.match(result.frames.at(-1).text, /未读取/)
   assert.ok(llm.requests.length > before, 'the model was asked again after the refusal')
-  const refusal = discussionSessions.get(globalThis.discussionSessionId)
+  const refusal = preparedSessions.get(globalThis.discussionSessionId)
   const refusalResult = refusal.appended.filter((event) => event.type === 'tool/result').at(-1)
   assert.equal(refusalResult.data.message.isError, true, 'the refusal is a durable tool result')
 })
 
 await check('refuses a tool that is not whitelisted, once', async () => {
   llm.queue(() => bashStream())
+  llm.queue(() => textStream(['此处不能删除文件，可以讨论修改方案。'], {}))
   const before = llm.requests.length
   const result = await call('POST', '/side-chat/send', {
     discussionId: globalThis.discussionId,
@@ -594,7 +603,10 @@ await check('refuses a tool that is not whitelisted, once', async () => {
   assert.equal(toolFrames.at(-1).status, 'error')
   assert.match(toolFrames.at(-1).text, /该工具在临时会话中不可用/)
   assert.ok(result.frames.some((frame) => frame.type === 'notice'), 'the refusal is announced')
-  assert.ok(llm.requests.length > before, 'the model is asked again once before the turn closes')
+  assert.equal(llm.requests.length - before, 2)
+  assert.equal(result.frames.at(-1).status, 'done')
+  const feedback = llm.requests.at(-1).messages.find(message => message.role === 'tool' && message.toolCallId === 'call-3')
+  assert.match(feedback.content[0].text, /glob 找文件/)
 })
 
 await check('stops a running answer and keeps the partial text', async () => {
@@ -660,12 +672,13 @@ await check('lists providers and models for the discussion model menu', async ()
   assert.deepEqual(result.json.models.fake, [{ id: 'fake-1', name: 'Fake One' }])
 })
 
-await check('drives a real Session with real events and live frames', async () => {
+await check('records private Session events and streams without global Agent events', async () => {
   const open = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
   const discussion = open.json.discussion
   assert.ok(discussion.sessionId, 'the discussion reports its Session id')
-  const created = discussionSessions.get(discussion.sessionId)
-  assert.ok(created, 'the Session was entered into the store')
+  const created = preparedSessions.get(discussion.sessionId)
+  assert.ok(created, 'a private Session records the discussion')
+  assert.equal(discussionSessions.has(discussion.sessionId), false, 'never published into the main catalog')
   assert.ok(created.appended.length === 0, 'nothing is appended before the first question')
 
   llm.queue(() => toolCallStream())
@@ -677,9 +690,9 @@ await check('drives a real Session with real events and live frames', async () =
   })
 
   const types = created.appended.map((event) => event.type)
-  assert.deepEqual(types.slice(0, 3), ['turn/start', 'developer/message', 'user/message'])
-  // The fixture's parent ends in turn 2 (its in-flight turn), so discussion
-  // turns continue from there instead of colliding.
+  assert.deepEqual(types.slice(0, 3), ['turn/start', 'system/message', 'user/message'])
+  // The completed seed ends in turn 1; discussion turns start at 2,
+  // without importing the parent's unfinished turn.
   assert.equal(created.appended[0].data.turn, 2)
   for (const expected of ['step/start', 'step/end', 'request/header', 'assistant/message', 'tool/call', 'tool/result', 'turn/end']) {
     assert.ok(types.includes(expected), `appended ${expected}`)
@@ -703,17 +716,11 @@ await check('drives a real Session with real events and live frames', async () =
   const order = created.appended.map((event) => event.type)
   assert.equal(order.filter((type) => type === 'step/start').length, order.filter((type) => type === 'step/end').length)
 
-  const mine = liveFrames.filter((frame) => String(frame.attemptId).startsWith(discussion.sessionId))
-  assert.ok(mine.some((frame) => frame.type === 'start'), 'a live attempt started')
-  assert.ok(mine.some((frame) => frame.type === 'chunk'), 'chunks were published live')
-  const end = mine.find((frame) => frame.type === 'end')
-  assert.equal(end.outcome.kind, 'committed')
-  assert.equal(end.outcome.eventType, 'assistant/message')
-  assert.ok(end.attemptId.startsWith(discussion.sessionId), 'the frame names its session')
+  assert.equal(liveFrames.length, 0, 'no global Agent stream is published by a discussion')
 
   // Closing destroys the Session as well as the instance.
   await call('POST', '/side-chat/close', { discussionId: discussion.discussionId })
-  assert.equal(discussionSessions.has(discussion.sessionId), false, 'the Session was detached')
+  assert.equal(discussionSessions.has(discussion.sessionId), false, 'the Session was never published')
 })
 
 await check('builds a request the provider accepts, tool pairs intact', async () => {
@@ -756,46 +763,51 @@ await check('keeps the inherited tool pair intact after a budget cut', async () 
   }
 })
 
-await check('closes tool calls left open by a capped turn, so the next request works', async () => {
-  // The provider rejects a request whose history ends with an unanswered tool
-  // call ("tool calls need immediate results"). A turn can be cut short with
-  // calls still open, so the assembled request must close them.
+await check('successful queries continue beyond four rounds and expose only the final answer', async () => {
   const open = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
   const discussionId = open.json.discussion.discussionId
-  for (let round = 0; round < 5; round += 1) llm.queue(() => toolCallStream())
-  const capped = await call('POST', '/side-chat/send', {
-    discussionId,
-    requestId: 'req-cap',
-    text: '反复读取同一个文件',
+  for (let round = 0; round < 8; round += 1) llm.queue(() => toolCallStream())
+  llm.queue(() => textStream(['完整核查结果。'], {}))
+  const result = await call('POST', '/side-chat/send', {
+    discussionId, requestId: 'req-many', text: '请核查八次',
   })
-  assert.ok(
-    capped.frames.some((frame) => frame.type === 'notice'),
-    'the round cap was reported',
-  )
-  const lastAssistant = capped.frames.filter((frame) => frame.type === 'tool').length
-  assert.ok(lastAssistant >= 4, 'the tool rounds ran')
-
-  llm.queue(() => textStream(['第二阶段正常。'], { inputTokens: 9, outputTokens: 3 }))
-  const second = await call('POST', '/side-chat/send', {
-    discussionId,
-    requestId: 'req-after-cap',
-    text: '继续',
-  })
-  const request = llm.requests.at(-1)
-  assertProviderAcceptable(request.messages, 'after a capped turn')
-  const synthetic = request.messages.filter(
-    (message) => message.role === 'tool' && /未完成/.test(message.content?.[0]?.text ?? ''),
-  )
-  assert.ok(synthetic.length >= 1, 'the open call was closed with a synthetic result')
-  assert.match(second.frames.at(-1).text, /第二阶段正常/)
+  assert.equal(result.frames.filter(frame => frame.type === 'tool' && frame.status === 'done').length, 8)
+  assert.equal(result.frames.some(frame => frame.type === 'notice'), false)
+  assert.equal(result.frames.at(-1).text, '完整核查结果。')
+  assert.equal(result.frames.at(-1).process.length, 8)
+  assert.equal(result.frames.filter(frame => frame.type === 'step').length, 9)
+  llm.queue(() => textStream(['下一轮正常。'], {}))
+  await call('POST', '/side-chat/send', { discussionId, requestId: 'req-after-many', text: '继续' })
+  assertProviderAcceptable(llm.requests.at(-1).messages, 'after eight successful rounds')
+  assert.equal(llm.requests.at(-1).tools.length, 3)
   await call('POST', '/side-chat/close', { discussionId })
 })
 
-await check('refuses an identical repeat of a failed tool call and ends the turn', async () => {
+await check('a whole-turn timeout preserves partial text and allows a fresh request', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: false, turnTimeoutMs: 25 })
+  const opened = await runtime.open({ parentSessionId: 'session-1' })
+  const frames = []
+  llm.queue(options => hangingStream(options.signal))
+  const result = await runtime.send({ discussionId: opened.discussionId, requestId: 'timeout', text: '慢查询' }, frame => frames.push(frame))
+  assert.equal(result.status, 'error')
+  assert.equal(frames.at(-1).text, '正在')
+  assert.ok(frames.some(frame => frame.type === 'error' && frame.code === 'discussion-timeout'))
+  assert.equal(runtime.get(opened.discussionId).generating, false)
+  llm.queue(() => textStream(['新问题正常。'], {}))
+  const nextFrames = []
+  const next = await runtime.send({ discussionId: opened.discussionId, requestId: 'fresh', text: '新问题' }, frame => nextFrames.push(frame))
+  assert.equal(next.status, 'done')
+  assert.equal(nextFrames.at(-1).text, '新问题正常。')
+  assert.ok(llm.requests.at(-1).messages.some(message => message.role === 'assistant' && message.content.some(block => block.text === '正在')), 'visible partial prose remains available for follow-up')
+  runtime.closeAll()
+})
+
+await check('refuses an identical repeat and finishes with an answer', async () => {
   const open = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
   const discussionId = open.json.discussion.discussionId
   llm.queue(() => missingFileStream())
   llm.queue(() => missingFileStream())
+  llm.queue(() => textStream(['文件不存在，这部分未验证。'], {}))
   const result = await call('POST', '/side-chat/send', {
     discussionId,
     requestId: 'req-dup',
@@ -806,10 +818,133 @@ await check('refuses an identical repeat of a failed tool call and ends the turn
   assert.match(errors[0].text, /文件不存在/)
   assert.match(errors[1].text, /不再重复执行/, 'the identical retry never reached the tool')
   assert.ok(
-    result.frames.some((frame) => frame.type === 'notice' && /重复执行|按只读范围拒绝/.test(frame.message ?? '')),
-    'the runaway turn ended with a notice',
+    result.frames.some((frame) => frame.type === 'notice' && /正在根据已有信息整理回答/.test(frame.message ?? '')),
+    'the duplicate call was stopped with a notice',
   )
+  assert.equal(result.frames.at(-1).status, 'done')
+  assert.match(result.frames.at(-1).text, /未验证/)
   await call('POST', '/side-chat/close', { discussionId })
+})
+
+
+async function* proposedTool(name, args, id = 'call-recovery') {
+  yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: JSON.stringify(args) } }
+  yield { type: 'finish', reason: { kind: 'tool-calls' } }
+}
+
+await check('a refused bash call recovers through read and gives an evidence-based answer', async () => {
+  const parentBefore = session.snapshotEvents()
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = opened.json.discussion.discussionId
+  const before = llm.requests.length
+  llm.queue(() => bashStream())
+  llm.queue(() => toolCallStream())
+  llm.queue(() => textStream(['README 已读取；运行测试的结果未验证。'], {}))
+  const result = await call('POST', '/side-chat/send', { discussionId, requestId: 'recover-read', text: '现在还剩多少工作？' })
+  assert.equal(llm.requests.length - before, 3)
+  assert.deepEqual(llm.requests[before].tools.map(tool => tool.name), ['read', 'glob', 'grep'])
+  assert.equal(result.frames.at(-1).status, 'done')
+  assert.match(result.frames.at(-1).text, /运行测试的结果未验证/)
+  assert.ok(result.frames.some(frame => frame.type === 'tool' && frame.name === 'read' && frame.status === 'done'))
+  assert.deepEqual(session.snapshotEvents(), parentBefore)
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('consecutive refusals make one tool-free finishing request, and the next turn can read', async () => {
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = opened.json.discussion.discussionId
+  const before = llm.requests.length
+  llm.queue(() => bashStream())
+  llm.queue(() => proposedTool('write', { file_path: 'README.md', text: 'changed' }, 'call-write'))
+  llm.queue(request => {
+    assert.equal(request.tools, undefined)
+    assertProviderAcceptable(request.messages, 'text-only finish')
+    assert.ok(request.messages.at(-1).content[0].text.startsWith(FINAL_ANSWER_INSTRUCTION))
+    return textStream(['没有执行命令或修改文件；仅能根据现有材料判断。'], {})
+  })
+  const result = await call('POST', '/side-chat/send', { discussionId, requestId: 'recover-final', text: '检查并修改项目' })
+  assert.equal(llm.requests.length - before, 3)
+  assert.equal(result.frames.at(-1).status, 'done')
+  assert.match(result.frames.at(-1).text, /没有执行命令或修改文件/)
+  assert.equal(FILES.get('/ws/README.md'), '# side-chat\nsecond line\n')
+  llm.queue(() => toolCallStream())
+  llm.queue(() => textStream(['下一轮读取正常。'], {}))
+  await call('POST', '/side-chat/send', { discussionId, requestId: 'after-finish', text: '读一下 README' })
+  const request = llm.requests.at(-1)
+  assert.deepEqual(request.tools.map(tool => tool.name), ['read', 'glob', 'grep'])
+  assert.equal(request.messages.some(message => message.content.some(block => block.text?.includes(FINAL_ANSWER_INSTRUCTION)) && message.role === 'system'), false)
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('a finishing request cannot dispatch tools or loop forever', async () => {
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = opened.json.discussion.discussionId
+  const before = llm.requests.length
+  llm.queue(() => bashStream())
+  llm.queue(() => bashStream())
+  llm.queue(() => proposedTool('read', { file_path: 'README.md' }, 'call-final-read'))
+  const result = await call('POST', '/side-chat/send', { discussionId, requestId: 'bad-finish', text: '核查进度' })
+  assert.equal(llm.requests.length - before, 3)
+  assert.equal(result.frames.at(-1).status, 'error')
+  assert.ok(result.frames.some(frame => frame.type === 'error' && /未能完成答复/.test(frame.message)))
+  assert.equal(result.frames.some(frame => frame.type === 'tool' && frame.name === 'read'), false)
+  llm.queue(() => textStream(['后续请求仍然正常。'], {}))
+  await call('POST', '/side-chat/send', { discussionId, requestId: 'after-bad-finish', text: '说明限制' })
+  assertProviderAcceptable(llm.requests.at(-1).messages, 'after failed finish')
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('an empty model response is a recoverable error rather than a blank success', async () => {
+  const open = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = open.json.discussion.discussionId
+  llm.queue(() => textStream([], {}))
+  const result = await call('POST', '/side-chat/send', { discussionId, requestId: 'empty-normal', text: '问题' })
+  assert.equal(result.frames.at(-1).status, 'error')
+  assert.ok(result.frames.some(frame => frame.type === 'error' && /未返回回答正文/.test(frame.message)))
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('an empty finishing response reports incomplete verification instead of success', async () => {
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = opened.json.discussion.discussionId
+  llm.queue(() => bashStream())
+  llm.queue(() => bashStream())
+  llm.queue(() => textStream([], {}))
+  const result = await call('POST', '/side-chat/send', { discussionId, requestId: 'empty-finish', text: '核查进度' })
+  assert.equal(result.frames.at(-1).status, 'error')
+  assert.match(result.frames.at(-1).message, /核查未完成/)
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('stopping the tool-free finish cancels only this request', async () => {
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const discussionId = opened.json.discussion.discussionId
+  llm.queue(() => bashStream())
+  llm.queue(() => bashStream())
+  llm.queue(options => hangingStream(options.signal))
+  const pending = startCall('POST', '/side-chat/send', { discussionId, requestId: 'stop-finish', text: '核查进度' })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(llm.requests.at(-1).tools, undefined)
+  await call('POST', '/side-chat/cancel', { discussionId, requestId: 'stop-finish' })
+  await pending.finished
+  assert.equal(parseFrames(pending.body).at(-1).status, 'stopped')
+  assert.ok(ctx.sessions.get('session-1'))
+  await call('POST', '/side-chat/close', { discussionId })
+})
+
+await check('closing during the tool-free finish aborts it and removes the memory session', async () => {
+  const opened = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
+  const { discussionId, sessionId } = opened.json.discussion
+  llm.queue(() => bashStream())
+  llm.queue(() => bashStream())
+  llm.queue(options => hangingStream(options.signal))
+  const pending = startCall('POST', '/side-chat/send', { discussionId, requestId: 'close-finish', text: '核查进度' })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const signal = llm.requests.at(-1).signal
+  await call('POST', '/side-chat/close', { discussionId })
+  await pending.finished
+  assert.equal(signal.aborted, true)
+  assert.equal(discussionSessions.has(sessionId), false)
 })
 
 console.log(`\n${failures.length === 0 ? 'all checks passed' : `${failures.length} check(s) failed`}\n`)

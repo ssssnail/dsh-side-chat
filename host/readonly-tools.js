@@ -14,6 +14,7 @@
  *     followed.
  */
 
+import { READ_ONLY_RECOVERY_GUIDANCE } from './prompt.js'
 import { createGrepMatcher, createGlobMatcher } from './grep-matcher.js'
 
 /** Declared tool names. Anything not in this set is refused before dispatch. */
@@ -304,7 +305,7 @@ export async function createReadOnlyToolbox(ctx, workspacePath) {
     async execute(name, rawArguments, signal) {
       if (!READ_ONLY_TOOL_NAMES.includes(name)) {
         return {
-          text: `该工具在临时会话中不可用。这里只开放只读的 ${READ_ONLY_TOOL_NAMES.join('、')}。`,
+          text: `该工具在临时会话中不可用。这里只开放只读的 ${READ_ONLY_TOOL_NAMES.join('、')}。${READ_ONLY_RECOVERY_GUIDANCE}`,
           isError: true,
           refused: true,
         }
@@ -323,7 +324,11 @@ export async function createReadOnlyToolbox(ctx, workspacePath) {
         return { text, isError: false }
       } catch (error) {
         if (error instanceof ReadOnlyToolError) {
-          return { text: error.message, isError: true, ...(error.refused ? { refused: true } : {}) }
+          return {
+            text: error.refused ? `${error.message} ${READ_ONLY_RECOVERY_GUIDANCE}` : error.message,
+            isError: true,
+            ...(error.refused ? { refused: true } : {}),
+          }
         }
         return { text: `工具执行失败：${error?.message ?? error}`, isError: true }
       }

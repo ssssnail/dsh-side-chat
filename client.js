@@ -24,8 +24,9 @@ window.__ModuleLoader__.load({
   id: '@local/dsh-side-chat',
   factory(require) {
     const React = require('react')
+    const { MarkdownText } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
-    const { useState, useEffect, useRef, useCallback } = React
+    const { useState, useEffect, useRef, useCallback, useMemo } = React
 
     const NS = 'sideChat'
     const TAB_ID = '@local/dsh-side-chat'
@@ -34,7 +35,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
 
-    /** The send/stop button is a circle by construction, not by stylesheet. */
+    /** Square button metrics; CSS explicitly overrides the theme's corner shape. */
     const ROUND_BUTTON = {
       width: 34,
       height: 34,
@@ -73,6 +74,13 @@ window.__ModuleLoader__.load({
       tools: '可用工具：{tools}',
       workspace: '工作区：{path}',
       starting: '正在准备临时会话…',
+      reopen: '重新打开讨论',
+      retryOpen: '重试打开',
+      ended: '临时讨论已结束',
+      endedHint: '页面刷新或讨论关闭后，历史不会保留。可以重新打开讨论。',
+      latest: '回到最新',
+      process: '查阅过程',
+      recoverQuestion: '重新编辑问题',
       emptySimple: '这是一个临时会话，关闭后会清除所有信息。',
       closing: '关闭中…',
       placeholder: '提出讨论问题，Enter 发送，Shift+Enter 换行',
@@ -88,6 +96,16 @@ window.__ModuleLoader__.load({
       close: '关闭',
       copy: '复制',
       copied: '已复制',
+      copyFailed: '复制失败，请重试。',
+      answerActions: '回答操作',
+      copyAnswer: '复制这条回答的 Markdown 正文',
+      importAnswer: '导入到主会话',
+      importAnswerHint: '将这条回答加入主会话草稿，不会自动发送',
+      importedAnswer: '已加入草稿',
+      footnotes: '脚注',
+      codeTitle: '代码',
+      codeWrap: '自动换行',
+      codeUnwrap: '取消自动换行',
       toDraft: '放入主会话草稿',
       toDraftDone: '已放入主会话输入框。',
       toDraftMissing: '没有找到主会话的输入框，无法放入草稿。',
@@ -136,6 +154,13 @@ window.__ModuleLoader__.load({
       tools: 'Tools: {tools}',
       workspace: 'Workspace: {path}',
       starting: 'Preparing the temporary session…',
+      reopen: 'Open a new discussion',
+      retryOpen: 'Try opening again',
+      ended: 'The temporary discussion has ended',
+      endedHint: 'History is not kept after a page refresh or closing. You can open a new discussion.',
+      latest: 'Back to latest',
+      process: 'Exploration notes',
+      recoverQuestion: 'Edit the question again',
       emptySimple: 'This is a temporary session. Closing it clears everything.',
       placeholder: 'Ask a question. Enter sends, Shift+Enter breaks the line',
       send: 'Send',
@@ -150,6 +175,16 @@ window.__ModuleLoader__.load({
       close: 'Close',
       copy: 'Copy',
       copied: 'Copied',
+      copyFailed: 'Copy failed. Please try again.',
+      answerActions: 'Answer actions',
+      copyAnswer: 'Copy this answer as Markdown',
+      importAnswer: 'Add to main chat',
+      importAnswerHint: 'Add this answer to the main chat draft without sending',
+      importedAnswer: 'Added to draft',
+      footnotes: 'Footnotes',
+      codeTitle: 'Code',
+      codeWrap: 'Wrap lines',
+      codeUnwrap: 'Unwrap lines',
       toDraft: 'Add to the session draft',
       toDraftDone: 'Added to the main input box.',
       toDraftMissing: 'No main input box was found to add this to.',
@@ -295,114 +330,25 @@ window.__ModuleLoader__.load({
     }
 
     function emptyAnswer() {
-      return { id: newId('a'), role: 'assistant', text: '', reasoning: '', tools: [], status: 'streaming', stats: null, notice: null, error: null }
+      return { id: newId('a'), role: 'assistant', text: '', process: [], reasoning: '', tools: [], status: 'streaming', stats: null, notice: null, error: null }
     }
 
     /* -------------------------------------------------- markdown rendering */
 
-    const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
-
-    function escapeHtml(text) {
-      return String(text ?? '').replace(/[&<>"']/g, (character) => ESCAPES[character])
-    }
-
-    /** Inline spans: code, bold, italic, strikethrough, links. */
-    function renderInline(source) {
-      let html = escapeHtml(source)
-      const codeSpans = []
-      html = html.replace(/`([^`\n]+)`/g, (_, code) => {
-        codeSpans.push(code)
-        return `\u0000${codeSpans.length - 1}\u0000`
-      })
-      html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, href) => {
-        return `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`
-      })
-      html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-      html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>')
-      html = html.replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
-      html = html.replace(/\u0000(\d+)\u0000/g, (_, index) => `<code>${codeSpans[Number(index)]}</code>`)
-      return html
-    }
-
-    /**
-     * A small markdown subset: fenced code, headings, lists, quotes, rules and
-     * paragraphs. Deliberately not a full parser — the panel only has to render
-     * model answers legibly.
-     */
-    function renderMarkdown(source) {
-      const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n')
-      const out = []
-      let index = 0
-      while (index < lines.length) {
-        const line = lines[index]
-        const fence = /^\s*```(\S*)\s*$/.exec(line)
-        if (fence) {
-          const code = []
-          index += 1
-          while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
-            code.push(lines[index])
-            index += 1
-          }
-          index += 1
-          const language = fence[1] ? ` data-language="${escapeHtml(fence[1])}"` : ''
-          out.push(`<pre class="sc-code"${language}><code>${escapeHtml(code.join('\n'))}</code></pre>`)
-          continue
-        }
-        const heading = /^(#{1,6})\s+(.*)$/.exec(line)
-        if (heading) {
-          const level = Math.min(heading[1].length + 2, 6)
-          out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`)
-          index += 1
-          continue
-        }
-        if (/^\s*([-*_])\s*\1\s*\1[\s-*_]*$/.test(line)) {
-          out.push('<hr/>')
-          index += 1
-          continue
-        }
-        if (/^\s*>\s?/.test(line)) {
-          const quote = []
-          while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
-            quote.push(lines[index].replace(/^\s*>\s?/, ''))
-            index += 1
-          }
-          out.push(`<blockquote>${renderMarkdown(quote.join('\n'))}</blockquote>`)
-          continue
-        }
-        const bullet = /^\s*[-*+]\s+(.*)$/.exec(line)
-        const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line)
-        if (bullet || numbered) {
-          const ordered = Boolean(numbered)
-          const items = []
-          while (index < lines.length) {
-            const match = ordered ? /^\s*\d+[.)]\s+(.*)$/.exec(lines[index]) : /^\s*[-*+]\s+(.*)$/.exec(lines[index])
-            if (!match) break
-            items.push(`<li>${renderInline(match[1])}</li>`)
-            index += 1
-          }
-          out.push(ordered ? `<ol>${items.join('')}</ol>` : `<ul>${items.join('')}</ul>`)
-          continue
-        }
-        if (line.trim() === '') {
-          index += 1
-          continue
-        }
-        const paragraph = []
-        while (
-          index < lines.length &&
-          lines[index].trim() !== '' &&
-          !/^\s*```/.test(lines[index]) &&
-          !/^#{1,6}\s+/.test(lines[index]) &&
-          !/^\s*[-*+]\s+/.test(lines[index]) &&
-          !/^\s*\d+[.)]\s+/.test(lines[index]) &&
-          !/^\s*>\s?/.test(lines[index])
-        ) {
-          paragraph.push(lines[index])
-          index += 1
-        }
-        out.push(`<p>${renderInline(paragraph.join('\n')).replace(/\n/g, '<br/>')}</p>`)
-      }
-      return out.join('')
+    /** Use the main chat's incremental Markdown renderer and native styles. */
+    function MarkdownBody({ t, text, streaming }) {
+      const copyLabel = t('copy')
+      const copiedLabel = t('copied')
+      const footnotes = t('footnotes')
+      const codeLabel = t('codeTitle')
+      const wrapLabel = t('codeWrap')
+      const unwrapLabel = t('codeUnwrap')
+      // Stable labels preserve MarkdownText's streaming block cache.
+      const labels = useMemo(() => ({
+        code: { copyLabel, copiedLabel, toolbarLabels: { codeLabel, wrapLabel, unwrapLabel } },
+        footnotes,
+      }), [copyLabel, copiedLabel, codeLabel, wrapLabel, unwrapLabel, footnotes])
+      return h('div', { className: 'sc-md' }, h(MarkdownText, { text, streaming, labels }))
     }
 
     /* ------------------------------------------------------------- drafts */
@@ -519,7 +465,16 @@ window.__ModuleLoader__.load({
         if (frame.discussionId !== body.discussionId || frame.requestId !== body.requestId
           || state.discussion?.discussionId !== body.discussionId || state.requestId !== body.requestId) return
         const live = state.live ?? answer
-        if (frame.type === 'text') {
+        // Process notices expire on resumed progress; errors stay separately visible.
+        if (frame.type === 'text' || frame.type === 'reasoning' || frame.type === 'done'
+          || (frame.type === 'tool' && frame.status === 'running')) live.notice = null
+        if (frame.type === 'step') {
+          if (live.step && frame.step !== live.step) {
+            if (live.text.trim()) live.process = [...(live.process ?? []), live.text]
+            live.text = ''
+          }
+          live.step = frame.step
+        } else if (frame.type === 'text') {
           live.text += frame.text ?? ''
         } else if (frame.type === 'reasoning') {
           live.reasoning += frame.text ?? ''
@@ -543,7 +498,8 @@ window.__ModuleLoader__.load({
         } else if (frame.type === 'done') {
           completed = true
           live.status = frame.status === 'stopped' ? 'stopped' : frame.status === 'error' ? 'error' : 'done'
-          live.text = live.text || frame.text || ''
+          live.text = typeof frame.text === 'string' ? frame.text : live.text
+          if (Array.isArray(frame.process)) live.process = frame.process
           live.stats = frame.stats ?? null
           live.streaming = false
           store.set({ live: { ...live }, lastStats: frame.type === 'done' ? frame.stats ?? null : store.get().lastStats })
@@ -609,7 +565,7 @@ window.__ModuleLoader__.load({
         if (!ownsRequest()) return
         const settled = store.get().live ?? answer
         const finalMessages = [...store.get().messages]
-        if (settled.text || settled.reasoning || settled.tools?.length > 0 || settled.error || settled.notice) {
+        if (settled.text || settled.process?.length || settled.reasoning || settled.tools?.length > 0 || settled.error || settled.notice) {
           finalMessages.push({ ...settled, streaming: false, id: settled.id ?? answer.id })
         }
         store.set((current) => ({
@@ -690,31 +646,40 @@ window.__ModuleLoader__.load({
 .sc-title{color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);font-weight:500;line-height:22px;white-space:nowrap}
 .sc-badge{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sc-meta{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable;display:flex;flex-direction:column;gap:14px;padding:14px 12px 4px}
-.sc-turn{display:flex;flex-direction:column;gap:8px;min-width:0}
+.sc-scroll{overflow-anchor:none;flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable;display:flex;flex-direction:column;gap:14px;padding:14px 12px 4px}
+.sc-reading-controls{flex:none;display:flex;justify-content:center;padding:4px 12px}
+.sc-latest{border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:5px 12px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
+.sc-latest:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.sc-latest:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.sc-process{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
+.sc-process>summary{cursor:pointer}
+.sc-process .sc-md{margin-top:8px;color:var(--dsw-alias-label-secondary)}
+.sc-turn{flex-shrink:0;display:flex;flex-direction:column;gap:8px;min-width:0}
 .sc-question{align-self:flex-end;max-width:88%;box-sizing:border-box;background:var(--dsw-specific-bubble,var(--dsw-alias-bg-layer-1));border-radius:var(--dsw-radius-xl,12px);padding:10px 16px;white-space:pre-wrap;word-break:break-word;line-height:22px}
 .sc-answer{display:flex;flex-direction:column;gap:8px;min-width:0}
 .sc-answer-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.sc-md{line-height:22px;word-break:break-word}
-.sc-md p{margin:0 0 8px}
-.sc-md p:last-child{margin-bottom:0}
-.sc-md h3,.sc-md h4,.sc-md h5,.sc-md h6{margin:10px 0 6px;line-height:22px;font-weight:600}
-.sc-md ul,.sc-md ol{margin:0 0 8px;padding-left:20px}
-.sc-md li{margin:2px 0}
-.sc-md blockquote{margin:0 0 8px;padding:2px 0 2px 10px;border-left:2px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}
-.sc-md hr{border:0;border-top:.5px solid var(--dsw-alias-border-l2);margin:10px 0}
-.sc-md a{color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));text-decoration:none}
-.sc-md a:hover{text-decoration:underline}
-.sc-md code{background:var(--dsw-alias-interactive-bg-hover);border-radius:var(--dsw-radius-sm,4px);padding:1px 4px;font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px}
-.sc-code{margin:0 0 8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,8px);overflow-x:auto}
-.sc-code code{background:transparent;padding:0;font-size:12px;line-height:19px;white-space:pre}
+.sc-answer-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:2px}
+.sc-answer-action{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:32px;padding:5px 10px;border:1px solid var(--dsw-alias-border-l2,#d8dce3);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1,#f7f8fa);color:var(--dsw-alias-label-secondary,#536071);font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;white-space:nowrap;cursor:pointer;transition:background-color .12s,border-color .12s}
+.sc-answer-action svg{width:16px;height:16px;flex:none}
+.sc-answer-action[data-action="copy"]{min-width:96px}
+.sc-answer-action[data-action="draft"]{min-width:152px;color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4669dc));background:var(--dsw-alias-interactive-bg-hover,#eef2fa)}
+.sc-answer-action:hover:not(:disabled){color:var(--dsw-alias-label-primary,#202b3a);background:var(--dsw-alias-interactive-bg-hover,#e9edf4);border-color:var(--dsw-alias-border-l3,#c5ccd8)}
+.sc-answer-action:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4669dc));outline-offset:2px}
+.sc-answer-action:disabled{cursor:default;opacity:.65}
+.sc-answer-action[data-feedback="true"]{color:var(--dsw-alias-label-primary,#202b3a)}
+.sc-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.sc-md{min-width:0}
 .sc-reason{display:flex;flex-direction:column;gap:4px}
 .sc-reason-row{display:flex;align-items:center;gap:6px;height:24px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);cursor:pointer;user-select:none}
 .sc-reason-row:hover{color:var(--dsw-alias-label-secondary)}
 .sc-reason-text{margin:0;padding:0 0 2px 2px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;white-space:pre-wrap;word-break:break-word}
 .sc-reason-text[data-streaming="true"]{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 48px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 48px),transparent)}
 .sc-tools{display:flex;flex-direction:column;gap:4px}
-.sc-tool{display:flex;align-items:flex-start;gap:6px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;color:var(--dsw-alias-label-secondary)}
+.sc-tool{font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;color:var(--dsw-alias-label-secondary)}
+.sc-tool-summary{display:flex;align-items:center;gap:6px;cursor:pointer;list-style:none}
+.sc-tool-summary::-webkit-details-marker{display:none}
+.sc-tool-details .sc-tool-summary:before{content:"›";display:inline-block;width:8px}
+.sc-tool-details[open] .sc-tool-summary:before{transform:rotate(90deg)}
 .sc-tool-name{font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);color:var(--dsw-alias-label-primary)}
 .sc-tool-status{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
 .sc-tool[data-status="error"] .sc-tool-status{color:var(--dsw-alias-state-error-primary)}
@@ -734,9 +699,10 @@ window.__ModuleLoader__.load({
 .sc-empty-title{margin-top:4px;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);font-weight:500;line-height:22px}
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
 .sc-facts{display:flex;flex-direction:column;gap:3px;max-width:340px;margin-top:6px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
-.sc-composer{flex:none;margin-top:auto;height:var(--dsh-composer-height,152px);display:flex;flex-direction:column;justify-content:flex-end;padding:0 var(--dsh-composer-side-clearance,12px) var(--dsh-composer-dock-inset,8px)}
-.sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
-.sc-input{box-sizing:border-box;width:100%;height:auto;min-height:40px;resize:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:8px 14px}
+.sc-composer{flex:none;margin-top:auto;display:flex;flex-direction:column;padding:0 16px 4px}
+.sc-dock{display:flex;min-width:0;padding-top:4px}
+.sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;--dsw-elevation-stroke-color:var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
+.sc-input{box-sizing:border-box;width:calc(100% - 4px);margin-right:4px;height:auto;min-height:36px;resize:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:calc(24px + var(--dsh-content-font-delta,0px));outline:none;overflow-y:auto;padding:4px 8px 0 14px}
 .sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
 .sc-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:2px 8px 6px}
 .sc-tools-row{display:flex;align-items:center;gap:12px;min-width:0}
@@ -744,7 +710,7 @@ window.__ModuleLoader__.load({
 .sc-select{box-sizing:border-box;max-width:220px;height:28px;border:0;border-radius:var(--dsw-radius-sm,6px);background-color:transparent;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-position:right 4px center;background-repeat:no-repeat;background-size:12px 12px;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;appearance:none;outline:none;padding:0 20px 0 8px}
 .sc-select:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
 .sc-label{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:13px;line-height:20px}
-.sc-primary{box-sizing:border-box;display:grid;place-items:center;flex:none;width:34px;height:34px;border:0;border-radius:999px;background:var(--dsw-alias-button-info-fill,var(--dsw-alias-brand-primary));color:#fff;cursor:pointer;transition:background-color .1s;transform:translateY(-2px);padding:0}
+.sc-primary{box-sizing:border-box;display:grid;place-items:center;flex:none;width:34px;height:34px;border:0;border-radius:999px;corner-shape:round;background:var(--dsw-alias-button-info-fill,var(--dsw-alias-brand-primary));color:#fff;cursor:pointer;transition:background-color .1s;transform:translateY(-2px);padding:0}
 .sc-primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,var(--dsw-alias-button-info-fill))}
 .sc-primary:disabled{opacity:.4;cursor:default}
 .sc-icon{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
@@ -901,17 +867,73 @@ window.__ModuleLoader__.load({
 
     function ToolRow({ t, tool }) {
       const label = tool.status === 'running' ? t('toolRunning') : tool.status === 'error' ? t('toolFailed') : t('toolDone')
-      return h(
-        'div',
-        { className: 'sc-tool', 'data-status': tool.status },
-        h('span', { className: 'sc-tool-name' }, tool.name),
-        h('span', { className: 'sc-tool-status' }, `· ${label}`),
-        tool.text ? h('pre', { className: 'sc-tool-text' }, previewText(tool.text)) : null,
-      )
+      const summary = [
+        h('span', { className: 'sc-tool-name', key: 'name' }, tool.name),
+        h('span', { className: 'sc-tool-status', key: 'status' }, `· ${label}`),
+      ]
+      return tool.text
+        ? h('details', { className: 'sc-tool sc-tool-details', 'data-status': tool.status },
+            h('summary', { className: 'sc-tool-summary' }, summary),
+            h('pre', { className: 'sc-tool-text' }, previewText(tool.text)))
+        : h('div', { className: 'sc-tool', 'data-status': tool.status },
+            h('div', { className: 'sc-tool-summary' }, summary))
+    }
+
+    function AnswerActionIcon({ kind }) {
+      return h('svg', { viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5,
+        strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
+        kind === 'check'
+          ? h('path', { d: 'M4 10l4 4 8-8' })
+          : kind === 'copy'
+            ? [h('rect', { key: 'front', x: 7, y: 7, width: 10, height: 10, rx: 2 }),
+              h('path', { key: 'back', d: 'M12 4V3H3v9h1' })]
+            : [h('path', { key: 'bubble', d: 'M8 4H3v13l4-3h10v-4' }),
+              h('path', { key: 'arrow', d: 'M10 3h7v7M17 3l-8 8' })])
+    }
+
+    function AnswerActions({ t, body, parentSessionId, notify }) {
+      const [feedback, setFeedback] = useState(null)
+      const [pending, setPending] = useState(null)
+      const inFlight = useRef(false)
+      const feedbackTimer = useRef(null)
+      useEffect(() => () => clearTimeout(feedbackTimer.current), [])
+      const act = async (kind) => {
+        if (inFlight.current) return
+        inFlight.current = true
+        setPending(kind)
+        try {
+          if (kind === 'copy') await navigator.clipboard.writeText(body)
+          else if (!await appendToDraft(parentSessionId, body)) {
+            notify(t('toDraftMissing'))
+            return
+          }
+          clearTimeout(feedbackTimer.current)
+          setFeedback(kind)
+          feedbackTimer.current = setTimeout(() => setFeedback(null), 2000)
+        } catch (error) {
+          reportFailure(kind, error)
+          notify(t(kind === 'copy' ? 'copyFailed' : 'toDraftMissing'))
+        } finally {
+          inFlight.current = false
+          setPending(null)
+        }
+      }
+      return h('div', { className: 'sc-answer-toolbar', role: 'group', 'aria-label': t('answerActions') },
+        ['copy', 'draft'].map(kind => h('button', {
+          key: kind, type: 'button', className: 'sc-answer-action', 'data-action': kind,
+          'data-feedback': feedback === kind, disabled: pending !== null,
+          title: t(kind === 'copy' ? 'copyAnswer' : 'importAnswerHint'),
+          'aria-label': t(kind === 'copy' ? 'copy' : 'importAnswer'),
+          'aria-busy': pending === kind,
+          onClick: () => act(kind),
+        }, h(AnswerActionIcon, { kind: feedback === kind ? 'check' : kind }),
+        h('span', null, t(feedback === kind ? kind === 'copy' ? 'copied' : 'importedAnswer' : kind === 'copy' ? 'copy' : 'importAnswer')))),
+        h('span', { className: 'sc-sr-only', role: 'status', 'aria-live': 'polite' },
+          feedback ? t(feedback === 'copy' ? 'copied' : 'importedAnswer') : ''))
     }
 
     /** One assistant answer: reasoning, tools, markdown body, usage, actions. */
-    function AnswerBlock({ t, message, parentSessionId, notify }) {
+    function AnswerBlock({ t, message, parentSessionId, notify, onRecover }) {
       const streaming = message.status === 'streaming'
       const body = message.text?.trim() ? message.text : ''
       return h(
@@ -921,8 +943,11 @@ window.__ModuleLoader__.load({
         message.tools?.length
           ? h('div', { className: 'sc-tools' }, message.tools.map((tool, index) => h(ToolRow, { t, tool, key: `${tool.name}-${index}` })))
           : null,
+        message.process?.length ? h('details', { className: 'sc-process' },
+          h('summary', null, t('process')),
+          message.process.map((text, index) => h(MarkdownBody, { key: index, t, text, streaming: false }))) : null,
         body
-          ? h('div', { className: 'sc-md', dangerouslySetInnerHTML: { __html: renderMarkdown(body) } })
+          ? h(MarkdownBody, { t, text: body, streaming })
           : streaming && !message.reasoning
             ? h('div', { className: 'sc-tool-status' }, t('reasoningRunning'))
             : !streaming && message.error
@@ -933,43 +958,21 @@ window.__ModuleLoader__.load({
         !streaming && message.error
           ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, fill(t('error'), { message: message.error }))
           : null,
-        h(
-          'div',
-          { className: 'sc-answer-actions' },
-          !streaming && body
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'sc-btn',
-                  onClick: async () => {
-                    const ok = await appendToDraft(parentSessionId, body)
-                    notify(ok ? t('toDraftDone') : t('toDraftMissing'))
-                  },
-                },
-                t('toDraft'),
-              )
-            : null,
-          !streaming && body
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'sc-btn',
-                  onClick: async () => {
-                    try {
-                      await navigator.clipboard.writeText(body)
-                      notify(t('copied'))
-                    } catch (error) {
-                      reportFailure('copy', error)
-                    }
-                  },
-                },
-                t('copy'),
-              )
-            : null,
-        ),
+        !streaming && message.error && onRecover ? h('button', { type: 'button', className: 'sc-btn', onClick: onRecover }, t('recoverQuestion')) : null,
+        !streaming && body ? h(AnswerActions, { t, body, parentSessionId, notify }) : null,
       )
+    }
+
+    function PreparingState({ t }) {
+      const [showSpinner, setShowSpinner] = useState(false)
+      useEffect(() => {
+        const timer = setTimeout(() => setShowSpinner(true), 200)
+        return () => clearTimeout(timer)
+      }, [])
+      return h('div', { className: 'sc-empty' },
+        showSpinner ? h('svg', { width: 28, height: 28, viewBox: '0 0 24 24', fill: 'none', className: 'sc-spin', 'aria-hidden': true },
+          h('path', { d: 'M12 3a9 9 0 1 0 9 9', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' })) : null,
+        h('div', { className: 'sc-empty-title' }, t('starting')))
     }
 
     /** The panel: header facts, transcript, composer, close confirmation. */
@@ -979,6 +982,11 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState('')
       const [notice, setNotice] = useState(null)
       const scrollRef = useRef(null)
+      const inputRef = useRef(null)
+      const focusedDiscussion = useRef(null)
+      const followBottom = useRef(true)
+      const previousTurn = useRef(null)
+      const [showLatest, setShowLatest] = useState(false)
       const tabInfo = props.hooks?.tabInfo?.()
       const tabSignal = tabInfo?.tab.signal
       const ownerSessionId = props.sessionId ?? sharedState.parentSessionId
@@ -994,9 +1002,49 @@ window.__ModuleLoader__.load({
       const live = state.live
 
       useEffect(() => {
+        setDraft('')
+        setNotice(null)
+        setShowLatest(false)
+        followBottom.current = true
+        previousTurn.current = null
+      }, [ownerSessionId, discussion?.discussionId])
+
+      useEffect(() => {
         const element = scrollRef.current
-        if (element) element.scrollTop = element.scrollHeight
-      }, [messages.length, live?.text, live?.reasoning, live?.tools?.length])
+        // A new question follows its own answer; streaming respects reader intent.
+        if (state.requestId && previousTurn.current !== state.requestId) {
+          previousTurn.current = state.requestId
+          followBottom.current = true
+          setShowLatest(false)
+        }
+        if (element && followBottom.current) element.scrollTop = element.scrollHeight
+      }, [discussion?.discussionId, state.requestId, messages.length, live])
+
+      const resizeInput = useCallback(() => {
+        const input = inputRef.current
+        if (!input) return
+        input.style.height = 'auto'
+        input.style.height = `${Math.min(180, Math.max(36, input.scrollHeight))}px`
+      }, [])
+      useEffect(resizeInput, [draft, discussion?.discussionId, resizeInput])
+      useEffect(() => {
+        const input = inputRef.current
+        if (!input || typeof ResizeObserver === 'undefined') return
+        let width = input.getBoundingClientRect().width
+        const observer = new ResizeObserver(() => {
+          const nextWidth = input.getBoundingClientRect().width
+          if (nextWidth !== width) { width = nextWidth; resizeInput() }
+        })
+        observer.observe(input)
+        return () => observer.disconnect()
+      }, [discussion?.discussionId, resizeInput])
+      useEffect(() => {
+        const id = discussion?.discussionId
+        if (id && id !== focusedDiscussion.current && !state.closeRequested) {
+          inputRef.current?.focus()
+          focusedDiscussion.current = id
+        }
+      }, [discussion?.discussionId, state.closeRequested])
 
       useEffect(() => {
         loadModels()
@@ -1021,9 +1069,17 @@ window.__ModuleLoader__.load({
 
       const submit = () => {
         const text = draft.trim()
-        if (!text || busy) return
+        if (!text || busy || !discussion || state.status !== 'idle') return
         setDraft('')
         sendQuestion(text)
+        inputRef.current?.focus()
+      }
+      const recover = question => { setDraft(question); inputRef.current?.focus() }
+      const backToLatest = () => {
+        followBottom.current = true
+        setShowLatest(false)
+        const element = scrollRef.current
+        if (element) element.scrollTop = element.scrollHeight
       }
 
       const onKeyDown = (event) => {
@@ -1052,18 +1108,11 @@ window.__ModuleLoader__.load({
           ),
         ) : null,
         state.openError && state.status !== 'error' ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.openError) : null,
-        !discussion && state.status === 'creating'
-          ? h(
-              'div',
-              { className: 'sc-empty' },
-              h(
-                'svg',
-                { width: 28, height: 28, viewBox: '0 0 24 24', fill: 'none', className: 'sc-spin', 'aria-hidden': true },
-                h('path', { d: 'M12 3a9 9 0 1 0 9 9', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
-              ),
-              h('div', { className: 'sc-empty-title' }, t('starting')),
-            )
-          : null,
+        !discussion && state.status === 'creating' ? h(PreparingState, { t }) : null,
+        !discussion && state.status === 'closed' ? h('div', { className: 'sc-empty' },
+          h('div', { className: 'sc-empty-title' }, t('ended')),
+          h('div', { className: 'sc-empty-desc' }, t('endedHint')),
+          h('button', { type: 'button', className: 'sc-btn', onClick: () => openDiscussion(ownerSessionId) }, t('reopen'))) : null,
         !discussion && state.status === 'error'
           ? h(
               'div',
@@ -1075,12 +1124,20 @@ window.__ModuleLoader__.load({
                 h('path', { d: 'M12 7.5v5.5M12 16.5v.5', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
               ),
               h('div', { className: 'sc-empty-title' }, fill(t('error'), { message: state.openError ?? '' })),
+              h('button', { type: 'button', className: 'sc-btn', onClick: () => openDiscussion(ownerSessionId) }, t('retryOpen')),
             )
           : null,
         discussion
           ? h(
               'div',
-              { className: 'sc-scroll', ref: scrollRef },
+              { className: 'sc-scroll', ref: scrollRef,
+                onScroll: (event) => {
+                  const element = event.currentTarget
+                  followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 24
+                  setShowLatest(!followBottom.current)
+                },
+                onWheel: (event) => { if (event.deltaY < 0) { followBottom.current = false; setShowLatest(true) } },
+              },
               messages.length === 0 && !live
                 ? h(
                     'div',
@@ -1108,11 +1165,14 @@ window.__ModuleLoader__.load({
               messages.map((message, index) =>
                 message.role === 'user'
                   ? h('div', { className: 'sc-turn', key: message.id ?? index }, h('div', { className: 'sc-question' }, message.text))
-                  : h('div', { className: 'sc-turn', key: message.id ?? index }, h(AnswerBlock, { t, message, parentSessionId: state.parentSessionId, notify })),
+                  : h('div', { className: 'sc-turn', key: message.id ?? index }, h(AnswerBlock, { t, message, parentSessionId: state.parentSessionId, notify,
+                      onRecover: index > 0 && messages[index - 1]?.role === 'user' ? () => recover(messages[index - 1].text) : undefined })),
               ),
               live ? h('div', { className: 'sc-turn' }, h(AnswerBlock, { t, message: { ...live, status: 'streaming' }, parentSessionId: state.parentSessionId, notify })) : null,
             )
           : null,
+        discussion && showLatest ? h('div', { className: 'sc-reading-controls' },
+          h('button', { type: 'button', className: 'sc-latest', onClick: backToLatest }, `↓ ${t('latest')}`)) : null,
         notice ? h('div', { className: 'sc-notice' }, notice) : null,
         state.notice ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.notice) : null,
         discussion
@@ -1124,6 +1184,7 @@ window.__ModuleLoader__.load({
                 { className: 'sc-card' },
                 h('textarea', {
                   className: 'sc-input',
+                  ref: inputRef,
                   value: draft,
                   placeholder: t('placeholder'),
                   rows: 1,
@@ -1174,7 +1235,7 @@ window.__ModuleLoader__.load({
                           h(
                             'svg',
                             { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': true },
-                            h('rect', { x: 4, y: 4, width: 8, height: 8, rx: 1.5, fill: 'currentColor' }),
+                            h('rect', { x: 3, y: 3, width: 10, height: 10, rx: 3, fill: 'currentColor' }),
                           ),
                         )
                       : h(
@@ -1190,20 +1251,17 @@ window.__ModuleLoader__.load({
                           },
                           h(
                             'svg',
-                            { width: 18, height: 18, viewBox: '0 0 18 18', fill: 'none', 'aria-hidden': true },
+                            { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': true },
                             h('path', {
-                              d: 'M9 14.5V4M9 4L4.5 8.5M9 4l4.5 4.5',
-                              stroke: 'currentColor',
-                              strokeWidth: 1.8,
-                              strokeLinecap: 'round',
-                              strokeLinejoin: 'round',
+                              d: 'M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z',
+                              fill: 'currentColor',
                             }),
                           ),
                         ),
                   ),
                 ),
               ),
-              h(UsageLine, { t, messages, lastStats: state.lastStats, discussion }),
+              h('div', { className: 'sc-dock' }, h(UsageLine, { t, messages, lastStats: state.lastStats, discussion })),
             )
           : null,
       )

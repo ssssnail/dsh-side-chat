@@ -69,6 +69,31 @@ await check('late stream and finally cannot write into a reopened discussion', a
   assert.equal(client.store.get().messages[1].text, 'new answer')
 })
 
+await check('process notices clear on resumed output and completion, while errors survive', async () => {
+  const client = await clientHarness()
+  client.store.set({ status: 'idle', discussion: { discussionId: 'notice-test' }, parentSessionId: 'parent' })
+  const pending = client.sendQuestion('check')
+  await wait()
+  client.frame(0, { type: 'notice', message: '正在改用只读工具继续核查。' })
+  await wait()
+  assert.equal(client.store.get().live.notice, '正在改用只读工具继续核查。')
+  client.frame(0, { type: 'reasoning', text: '读取相关材料' })
+  await wait()
+  assert.equal(client.store.get().live.notice, null)
+  client.frame(0, { type: 'notice', message: '正在根据已有信息整理回答。' })
+  client.frame(0, { type: 'text', text: '结论' })
+  await wait()
+  assert.equal(client.store.get().live.notice, null)
+  client.frame(0, { type: 'notice', message: '完成前的提示' })
+  client.frame(0, { type: 'error', message: '真正的失败' })
+  client.frame(0, { type: 'done', status: 'error' })
+  client.streams[0].controller.close()
+  await pending
+  const answer = client.store.get().messages.at(-1)
+  assert.equal(answer.notice, null)
+  assert.equal(answer.error, '真正的失败')
+})
+
 await check('close during initialization disposes a delayed open response', async () => {
   const client = await clientHarness()
   let accept
