@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createDiscussionRuntime } from '../host/runtime.js'
 import { captureSnapshot } from '../host/snapshot.js'
-import { FINAL_ANSWER_INSTRUCTION } from '../host/prompt.js'
+import { DISCUSSION_RULES, FINAL_ANSWER_INSTRUCTION } from '../host/prompt.js'
 
 const HARNESS = process.env.DSH_HARNESS_DIR
   ?? '/Users/snail/.local/share/pi-node/node-v22.23.2-darwin-x64/lib/node_modules/@deepseek-ai/dsh'
@@ -218,8 +218,7 @@ await check('real dsh projection retains complete discussion rules for both rout
     const projected = projectToolUpdates(request.messages, request.tools, mode, request.toolHistory)
     const rules = projected.messages.find(entry => entry.role === 'system' && hasText([entry], '你是临时讨论助手'))
     assert.ok(rules, 'the full instruction survives the real provider projection')
-    assert.ok(hasText([rules], '本讨论区始终只读'))
-    assert.ok(hasText([rules], '找文件使用 glob'))
+    assert.ok(hasText([rules], DISCUSSION_RULES))
   }
   const child = s.prepared.get(view.sessionId)
   assert.ok(child.ownEvents().some(event => event.type === 'system/message'))
@@ -232,13 +231,13 @@ await check('real dsh projection retains both compaction instructions and the re
   await threeTurns(s.runtime, view.discussionId)
   await s.runtime.compact(view.discussionId)
   const compact = s.requests.at(-1)
-  assert.ok(hasText(projectToolUpdates(compact.messages, compact.tools, 'in-history', undefined).messages, '本讨论区始终只读'))
+  assert.ok(hasText(projectToolUpdates(compact.messages, compact.tools, 'in-history', undefined).messages, DISCUSSION_RULES))
   await s.runtime.send({ discussionId: view.discussionId, requestId: 'after-real-compact', text: '接着讨论' })
   const request = s.requests.at(-1)
   const projected = projectToolUpdates(request.messages, request.tools, 'in-history', undefined)
   assert.ok(hasText(projected.messages, '较早的临时讨论摘要'))
   assert.ok(hasText(projected.messages, 'reply-4'))
-  assert.ok(hasText(projected.messages, '本讨论区始终只读'))
+  assert.ok(hasText(projected.messages, DISCUSSION_RULES))
   s.runtime.closeAll()
 })
 
@@ -282,7 +281,7 @@ await check('the real DeepSeek serializer sends rules and a paired tool-free fin
     }
     assert.equal(captured.length, 2, 'both requests reached the real transport serializer')
     for (const wire of captured) {
-      assert.ok(wire.messages.some(entry => entry.role === 'system' && entry.content.some(item => item.text?.includes('本讨论区始终只读'))))
+      assert.ok(wire.messages.some(entry => entry.role === 'system' && entry.content.some(item => item.text?.includes(DISCUSSION_RULES))))
     }
     const final = captured.at(-1)
     assert.equal(final.tools, undefined)

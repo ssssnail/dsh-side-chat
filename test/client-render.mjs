@@ -331,7 +331,7 @@ await check('native Markdown receives raw text, completed status and stable loca
   function collect(element) {
     if (!element || typeof element !== 'object') return
     if (Array.isArray(element)) return element.forEach(collect)
-    if (element.type === 'button' && textOf(element) === '复制') buttons.push(element)
+    if (element.type === 'button' && element.props?.['data-action'] === 'copy') buttons.push(element)
     collect(element.props?.children)
   }
   collect(tree)
@@ -339,7 +339,7 @@ await check('native Markdown receives raw text, completed status and stable loca
   assert.equal(copiedTexts.at(-1), markdown, 'copy preserves the original Markdown')
 })
 
-await check('answer actions expose clear labels and import only one answer into the existing draft', async () => {
+await check('icon-only actions retain accessible labels and import one answer without sending', async () => {
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
   const entry = registrations.find((item) => item.options.name === 'conversation.input.left')
   const writes = []
@@ -353,6 +353,8 @@ await check('answer actions expose clear labels and import only one answer into 
   assert.equal(button.props['aria-label'], '导入到主会话')
   assert.match(button.props.title, /草稿.*不会自动发送/)
   assert.ok(find(button, element => element.type === 'svg'), 'the action has a visible icon')
+  assert.equal(textOf(button), '', 'no visible text or pill label')
+  assert.equal(textOf(find(tree, element => element.props?.['data-action'] === 'copy')), '', 'copy is also icon-only')
   const before = calls.filter(call => call.url.endsWith('/send')).length
   await Promise.all([button.props.onClick(), button.props.onClick()])
   assert.equal(writes.length, 1, 'rapid double clicks do not duplicate the draft insertion')
@@ -361,7 +363,9 @@ await check('answer actions expose clear labels and import only one answer into 
   tree = render(panel.component, panelProps)
   const imported = find(tree, element => element.props?.['data-action'] === 'draft')
   assert.equal(imported.props['data-feedback'], true)
-  assert.match(textOf(imported), /已加入草稿/)
+  assert.equal(textOf(imported), '', 'feedback does not expand the icon button')
+  assert.equal(imported.props.title, '已加入草稿')
+  assert.match(textOf(tree), /已加入草稿/)
 })
 
 await check('clipboard failure is visible and leaves answer actions usable', async () => {

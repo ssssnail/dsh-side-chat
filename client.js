@@ -658,12 +658,10 @@ window.__ModuleLoader__.load({
 .sc-question{align-self:flex-end;max-width:88%;box-sizing:border-box;background:var(--dsw-specific-bubble,var(--dsw-alias-bg-layer-1));border-radius:var(--dsw-radius-xl,12px);padding:10px 16px;white-space:pre-wrap;word-break:break-word;line-height:22px}
 .sc-answer{display:flex;flex-direction:column;gap:8px;min-width:0}
 .sc-answer-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.sc-answer-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:2px}
-.sc-answer-action{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:32px;padding:5px 10px;border:1px solid var(--dsw-alias-border-l2,#d8dce3);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-layer-1,#f7f8fa);color:var(--dsw-alias-label-secondary,#536071);font:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px;white-space:nowrap;cursor:pointer;transition:background-color .12s,border-color .12s}
+.sc-answer-toolbar{display:flex;align-items:center;gap:2px;margin-top:2px}
+.sc-answer-action{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;min-width:28px;padding:6px;border:0;border-radius:var(--dsw-radius-sm,6px);background:transparent;color:var(--dsw-alias-label-tertiary,#798390);cursor:pointer;transition:background-color .12s,color .12s}
 .sc-answer-action svg{width:16px;height:16px;flex:none}
-.sc-answer-action[data-action="copy"]{min-width:96px}
-.sc-answer-action[data-action="draft"]{min-width:152px;color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4669dc));background:var(--dsw-alias-interactive-bg-hover,#eef2fa)}
-.sc-answer-action:hover:not(:disabled){color:var(--dsw-alias-label-primary,#202b3a);background:var(--dsw-alias-interactive-bg-hover,#e9edf4);border-color:var(--dsw-alias-border-l3,#c5ccd8)}
+.sc-answer-action:hover:not(:disabled){color:var(--dsw-alias-label-primary,#202b3a);background:var(--dsw-alias-interactive-bg-hover,#e9edf4)}
 .sc-answer-action:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4669dc));outline-offset:2px}
 .sc-answer-action:disabled{cursor:default;opacity:.65}
 .sc-answer-action[data-feedback="true"]{color:var(--dsw-alias-label-primary,#202b3a)}
@@ -922,12 +920,11 @@ window.__ModuleLoader__.load({
         ['copy', 'draft'].map(kind => h('button', {
           key: kind, type: 'button', className: 'sc-answer-action', 'data-action': kind,
           'data-feedback': feedback === kind, disabled: pending !== null,
-          title: t(kind === 'copy' ? 'copyAnswer' : 'importAnswerHint'),
+          title: t(feedback === kind ? kind === 'copy' ? 'copied' : 'importedAnswer' : kind === 'copy' ? 'copyAnswer' : 'importAnswerHint'),
           'aria-label': t(kind === 'copy' ? 'copy' : 'importAnswer'),
           'aria-busy': pending === kind,
           onClick: () => act(kind),
-        }, h(AnswerActionIcon, { kind: feedback === kind ? 'check' : kind }),
-        h('span', null, t(feedback === kind ? kind === 'copy' ? 'copied' : 'importedAnswer' : kind === 'copy' ? 'copy' : 'importAnswer')))),
+        }, h(AnswerActionIcon, { kind: feedback === kind ? 'check' : kind }))),
         h('span', { className: 'sc-sr-only', role: 'status', 'aria-live': 'polite' },
           feedback ? t(feedback === 'copy' ? 'copied' : 'importedAnswer') : ''))
     }
