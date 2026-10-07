@@ -211,7 +211,10 @@ const translate = (key, values) => {
 
 const failures = []
 const panelProps = { sessionId: 'session-1', t: translate,
-  hooks: { tabInfo: () => ({ tab: { signal: tabSignal, actions: { close: () => closedTabs.push('session-1-tab') } } }) } }
+  useTabInfo: () => ({ tab: { signal: tabSignal, actions: { close: () => {
+    ctx.sidebarRight.closeHandler.handler('session-1')
+    closedTabs.push('session-1-tab')
+  } } } }) }
 async function check(label, fn) {
   try {
     await fn()
@@ -475,7 +478,7 @@ await check('failed answers can return the original question to the input withou
   assert.equal(calls.filter(call => call.url.endsWith('/send')).length, before)
 })
 
-await check('tab close asks first, cancel preserves the discussion, confirm clears it', async () => {
+await check('real useTabInfo injection: cancel preserves the tab, confirm clears and removes it', async () => {
   assert.ok(ctx.sidebarRight.closeHandler, 'the close handler is registered')
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')
   assert.throws(() => ctx.sidebarRight.closeHandler.handler('session-1'), /关闭临时会话/)
@@ -483,6 +486,7 @@ await check('tab close asks first, cancel preserves the discussion, confirm clea
   assert.match(textOf(tree), /本次会话历史不会保留/)
   assert.equal(calls.some((call) => call.url.endsWith('/close')), false)
   find(tree, (element) => element.type === 'button' && textOf(element) === '继续讨论').props.onClick()
+  assert.equal(closedTabs.length, 0, 'cancel must not remove the tab')
   assert.equal(textOf(render(panel.component, panelProps)).includes('关闭临时会话？'), false)
   assert.throws(() => ctx.sidebarRight.closeHandler.handler('session-1'), /关闭临时会话/)
   tree = render(panel.component, panelProps)

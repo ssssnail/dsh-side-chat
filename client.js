@@ -984,7 +984,8 @@ window.__ModuleLoader__.load({
       const followBottom = useRef(true)
       const previousTurn = useRef(null)
       const [showLatest, setShowLatest] = useState(false)
-      const tabInfo = props.hooks?.tabInfo?.()
+      // Slot hooks are injected as use<Name> props by the DSH renderer.
+      const tabInfo = props.useTabInfo()
       const tabSignal = tabInfo?.tab.signal
       const ownerSessionId = props.sessionId ?? sharedState.parentSessionId
       const ownsDiscussion = ownerSessionId === sharedState.parentSessionId
