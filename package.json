@@ -6,8 +6,12 @@
   "description": "Temporary read-only discussion panel (side chat) for the DSH web GUI.",
   "icon": "./icon.svg",
   "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./client.js"
+    },
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
     "./icon.svg": "./icon.svg"
@@ -32,7 +36,6 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-sidebar-right"
