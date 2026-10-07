@@ -936,14 +936,9 @@ window.__ModuleLoader__.load({
 
       ctx.effect(
         () =>
-          ctx.slots.inject('conversation.input.left', () => {
-            try {
-              window.console?.info?.('[side-chat] registering the composer entry')
-            } catch {
-              /* console is optional */
-            }
-            return ctx.slots.register({ name: 'conversation.input.left', id: TAB_ID }, DiscussionEntry)
-          }),
+          ctx.slots.inject('conversation.input.left', () =>
+            ctx.slots.register({ name: 'conversation.input.left', id: TAB_ID, order: 50, locale: NS }, DiscussionEntry),
+          ),
         'side-chat:entry',
       )
 
