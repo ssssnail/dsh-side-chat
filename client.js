@@ -678,9 +678,9 @@ window.__ModuleLoader__.load({
 .sc-empty-title{margin-top:4px;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);font-weight:500;line-height:22px}
 .sc-empty-desc{max-width:300px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:20px}
 .sc-facts{display:flex;flex-direction:column;gap:3px;max-width:340px;margin-top:6px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:12px;line-height:18px}
-.sc-composer{flex:none;padding:0 12px 8px}
+.sc-composer{flex:none;margin-top:auto;height:var(--dsh-composer-height,152px);display:flex;flex-direction:column;justify-content:flex-end;padding:0 var(--dsh-composer-side-clearance,12px) 10px}
 .sc-card{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;width:100%;border-radius:var(--dsw-radius-panel,16px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));box-shadow:var(--dsw-elevation-soft,none);position:relative;padding-top:8px}
-.sc-input{box-sizing:border-box;width:100%;resize:none;min-height:36px;max-height:200px;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:4px 8px 0 14px}
+.sc-input{box-sizing:border-box;width:100%;height:auto;min-height:40px;resize:none;border:0;background:transparent;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font-family:var(--dsw-font-family,inherit);font-size:var(--dsh-content-font-size,14px);line-height:24px;outline:none;overflow-y:auto;padding:8px 14px}
 .sc-input::placeholder{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-secondary))}
 .sc-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:2px 8px 6px}
 .sc-tools-row{display:flex;align-items:center;gap:12px;min-width:0}
