@@ -119,6 +119,7 @@ window.__ModuleLoader__.load({
       error: '请求失败：{message}',
       unanswered: '（本轮没有产生回答）',
       usage: '用量',
+      usageTurnsSteps: '{turns} 轮 {steps} 步',
       usageInput: '输入',
       usageOutput: '输出',
       usageCacheRead: '缓存命中',
@@ -199,6 +200,7 @@ window.__ModuleLoader__.load({
       error: 'Request failed: {message}',
       unanswered: '(this turn produced no answer)',
       usage: 'Usage',
+      usageTurnsSteps: '{turns} turns {steps} steps',
       usageInput: 'Input',
       usageOutput: 'Output',
       usageCacheRead: 'Cache read',
@@ -831,7 +833,7 @@ window.__ModuleLoader__.load({
       const tokPerSec = lastStats && Number(lastStats.totalMs) > 0 ? Math.round(Number(lastStats.outputTokens ?? 0) / (Number(lastStats.totalMs) / 1000)) : 0
       const steps = Number(lastStats?.steps ?? discussion?.steps ?? 0)
       const parts = [
-        `${turns} 轮 ${steps} 步`,
+        fill(t('usageTurnsSteps'), { turns, steps }),
         `${compact(total)} tok`,
         `${tokPerSec} tok/s`,
         `${t('usageCacheHit')} ${percent}%`,

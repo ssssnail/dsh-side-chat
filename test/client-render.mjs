@@ -282,6 +282,16 @@ await check('the panel renders the prepared discussion', () => {
   assert.ok(find(tree, (element) => element.props?.className === 'sc-input'), 'the composer input')
 })
 
+await check('empty statistics use the selected language', () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  const english = key => dictionaries.sideChat.en[key] ?? key
+  const englishTree = render(panel.component, { ...panelProps, t: english })
+  const englishStats = textOf(find(englishTree, element => element.props?.className === 'sc-statsline'))
+  assert.equal(englishStats, '0 turns 0 steps · 0 tok · 0 tok/s · Cache hit 0%')
+  const chineseTree = render(panel.component, panelProps)
+  assert.match(textOf(find(chineseTree, element => element.props?.className === 'sc-statsline')), /^0 轮 0 步/)
+})
+
 await check('multiline input grows, caps its height and shrinks after clearing', () => {
   const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
   let tree = render(panel.component, panelProps)
@@ -312,6 +322,16 @@ await check('another session tab cannot display or control the discussion transc
   assert.equal(textOf(another).includes('session-one-private'), false)
   assert.equal(find(another, (element) => element.type === 'textarea'), undefined)
   assert.equal(ctx.sidebarRight.closeHandler.handler('session-2'), undefined)
+})
+
+await check('completed-turn statistics remain localized in English', () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  const english = key => dictionaries.sideChat.en[key] ?? key
+  const tree = render(panel.component, { ...panelProps, t: english })
+  const stats = textOf(find(tree, element => element.props?.className === 'sc-statsline'))
+  assert.match(stats, /^1 turns 0 steps/)
+  assert.doesNotMatch(stats, /轮|步/)
+  render(panel.component, panelProps)
 })
 
 await check('native Markdown receives raw text, completed status and stable localized labels', async () => {
