@@ -118,6 +118,8 @@ await check('snapshot budget trimming affects actual requests without invalidati
   assert.equal(snapshot.truncated, true)
   const view = await s.runtime.open({ parentSessionId: 'parent' })
   assert.ok(s.prepared.get(view.sessionId))
+  // The inflated startup estimator above intentionally exceeds the snapshot budget.
+  s.ctx.get = (name) => name === 'tokenMeter' ? { estimateMessage: m => JSON.stringify(m).length } : previousGet(name)
   await s.runtime.send({ discussionId: view.discussionId, requestId: 'one', text: 'discussion-question' })
   assert.deepEqual(s.requests[0].messages.slice(0, snapshot.messages.length), snapshot.messages)
   assert.equal(hasText(s.requests[0].messages, 'parent-question'), false)

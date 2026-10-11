@@ -19,7 +19,7 @@ import { createDiscussionRuntime } from './host/runtime.js'
 export const name = '@local/dsh-side-chat'
 
 /** Hard dependencies: without these the feature cannot work at all. */
-export const inject = ['llm', 'sessions', 'fs', 'webServer']
+export const inject = ['llm', 'sessions', 'fs', 'webServer', 'connection', 'tokenMeter']
 
 const ROUTE_PREFIX = '/side-chat'
 const MAX_BODY_BYTES = 1_000_000
@@ -30,7 +30,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000
  * process keeps the JavaScript generation it loaded, so this is how a live
  * profile confirms whether an edit took effect without a restart.
  */
-const PLUGIN_REVISION = 11
+const PLUGIN_REVISION = 12
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - host context.
@@ -95,6 +95,14 @@ export function apply(ctx) {
   /* ------------------------------------------------------------- transport */
 
   async function handle(req, res) {
+    const admission = ctx.connection.admit(req)
+    if ('rejection' in admission) {
+      return sendJson(res, admission.rejection, {
+        ok: false,
+        code: admission.rejection === 401 ? 'unauthorized' : 'forbidden',
+        message: admission.rejection === 401 ? '请通过 dsh 启动时提供的链接重新打开页面。' : '请求来源不受信任。',
+      })
+    }
     const url = new URL(req.url ?? '/', 'http://localhost')
     const pathname = url.pathname
 

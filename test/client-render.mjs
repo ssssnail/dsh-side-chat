@@ -517,6 +517,26 @@ await check('lost state offers a new discussion and failed opening offers retry'
   assert.equal(textOf(tree).includes('recover-this-question'), false, 'old history has been cleared')
 })
 
+await check('expired panel renders recovery, disables send and opens a fresh instance', async () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  sendResponse = () => new Response(JSON.stringify({ ok: false, code: 'discussion-gone', message: 'expired' }), { headers: { 'content-type': 'application/json' } })
+  let tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'expired question' } })
+  tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'button' && element.props.title === '发送').props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  tree = render(panel.component, panelProps)
+  assert.match(textOf(tree), /临时讨论已过期/)
+  assert.equal(find(tree, element => element.type === 'button' && element.props.title === '发送').props.disabled, true)
+  const before = calls.filter(call => call.url.endsWith('/open')).length
+  openResult = { ...openResult, discussion: { ...openResult.discussion, discussionId: 'after-expiry' } }
+  await find(tree, element => element.type === 'button' && textOf(element) === '重新打开讨论').props.onClick()
+  tree = render(panel.component, panelProps)
+  assert.equal(textOf(tree).includes('临时讨论已过期'), false)
+  assert.equal(calls.filter(call => call.url.endsWith('/open')).length, before + 1)
+  sendResponse = null
+})
+
 await check('every rendered copy key exists in the dictionary', () => {
   assert.deepEqual([...missingKeys], [], 'no missing locale keys')
 })

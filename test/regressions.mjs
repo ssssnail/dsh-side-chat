@@ -13,10 +13,11 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 async function clientHarness() {
   const source = (await readFile(new URL('../client.js', import.meta.url), 'utf8'))
-    .replace('return { inject, apply }', 'return { inject, apply, testing: { store, sendQuestion, stopAnswer, openDiscussion, closeDiscussion, setSidebar(value) { sidebar = value } } }')
+    .replace('return { inject, apply }', 'return { inject, apply, testing: { store, sendQuestion, stopAnswer, openDiscussion, closeDiscussion, requestClose, confirmClose, setSidebar(value) { sidebar = value } } }')
   let definition
   const streams = [], calls = []
   let openResponse
+  let sendResponse
   let closeResponse
   const sandbox = {
     window: { __ModuleLoader__: { load(value) { definition = value } }, console: { error() {} } },
@@ -24,6 +25,7 @@ async function clientHarness() {
     fetch: async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : undefined
       calls.push({ url, body })
+      if (url.endsWith('/send') && sendResponse) return sendResponse()
       if (url.endsWith('/send')) return new Response(new ReadableStream({ start(controller) { streams.push({ controller, body }) } }))
       if (url.endsWith('/open') && openResponse) return openResponse()
       if (url.endsWith('/close') && closeResponse) return closeResponse()
@@ -34,6 +36,7 @@ async function clientHarness() {
   const { testing } = definition.factory(() => ({ createElement() {} }))
   return {
     ...testing, calls, streams,
+    setSendResponse: (fn) => { sendResponse = fn },
     setOpenResponse: (fn) => { openResponse = fn },
     setCloseResponse: (fn) => { closeResponse = fn },
     frame(index, data) {
@@ -148,6 +151,57 @@ await check('an incomplete SSE stream is an error, not a successful answer', asy
   await pending
   assert.equal(client.store.get().messages.at(-1).status, 'error')
   assert.match(client.store.get().messages.at(-1).error, /提前结束/)
+})
+
+await check('confirmation opened during initialization still closes after initialization completes', async () => {
+  const client = await clientHarness()
+  let accept, removed = 0
+  client.setOpenResponse(() => new Promise(resolve => { accept = resolve }))
+  const opening = client.openDiscussion('parent')
+  client.requestClose()
+  const tag = client.store.get().closeRequested.tag
+  accept(new Response(JSON.stringify({ ok: true, discussion: { discussionId: 'ready' } })))
+  await opening
+  assert.equal(client.store.get().tag, tag)
+  await client.confirmClose(() => { removed++ })
+  assert.equal(client.store.get().status, 'closed')
+  assert.equal(removed, 1)
+  assert.ok(client.calls.some(c => c.url.endsWith('/close') && c.body.discussionId === 'ready'))
+})
+
+await check('expired JSON response retains readable answers and explicit reopen creates a fresh discussion', async () => {
+  const client = await clientHarness()
+  client.store.set({ status: 'idle', discussion: { discussionId: 'expired' }, parentSessionId: 'parent', messages: [{ role: 'assistant', text: 'old answer' }] })
+  client.setSendResponse(() => new Response(JSON.stringify({ ok: false, code: 'discussion-gone', message: 'expired' }), { headers: { 'content-type': 'application/json' } }))
+  await client.sendQuestion('question')
+  assert.equal(client.store.get().status, 'expired')
+  assert.equal(client.store.get().messages[0].text, 'old answer')
+  assert.equal(client.calls.filter(c => c.url.endsWith('/open')).length, 0)
+  client.setOpenResponse(() => new Response(JSON.stringify({ ok: true, discussion: { discussionId: 'fresh' } })))
+  await client.openDiscussion('parent')
+  assert.equal(client.store.get().discussion.discussionId, 'fresh')
+  assert.equal(client.store.get().messages.length, 0)
+  assert.equal(client.calls.filter(c => c.url.endsWith('/send')).length, 1, 'no automatic replay')
+})
+
+await check('authentication JSON errors are readable and do not masquerade as truncated SSE', async () => {
+  const client = await clientHarness()
+  client.store.set({ status: 'idle', discussion: { discussionId: 'one' }, parentSessionId: 'parent' })
+  client.setSendResponse(() => new Response(JSON.stringify({ ok: false, code: 'unauthorized', message: '重新打开页面' }), { status: 401, headers: { 'content-type': 'application/json' } }))
+  await client.sendQuestion('question')
+  assert.equal(client.store.get().messages.at(-1).error, '重新打开页面')
+})
+
+await check('completed frames retain step count for the usage line', async () => {
+  const client = await clientHarness()
+  client.store.set({ status: 'idle', discussion: { discussionId: 'one' }, parentSessionId: 'parent' })
+  const pending = client.sendQuestion('question')
+  await wait()
+  client.frame(0, { type: 'text', text: 'answer' })
+  client.frame(0, { type: 'done', status: 'done', steps: 3, stats: { outputTokens: 30, totalMs: 1000 } })
+  client.streams[0].controller.close()
+  await pending
+  assert.equal(client.store.get().lastStats.steps, 3)
 })
 
 await check('latest selected model wins without borrowing another model effort', () => {

@@ -1,7 +1,7 @@
 /**
  * Live end-to-end test of the running plugin, driven from this machine.
  *
- * The discussion API is a plain loopback route, so this drives the real thing —
+ * The discussion API is an authenticated loopback route, so this drives the real thing —
  * a real model call, the real read-only toolbox, the real Session — against the
  * running host rather than a fake.
  *
@@ -15,7 +15,8 @@
 const BASE = process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3080'
 const PARENT = process.env.DSH_SESSION_ID
 
-const headers = { 'content-type': 'application/json' }
+if (!process.env.DSH_BROWSER_COOKIE) throw new Error('Set DSH_BROWSER_COOKIE to the authenticated dsh browser cookie; it is never logged.')
+const headers = { 'content-type': 'application/json', cookie: process.env.DSH_BROWSER_COOKIE }
 
 async function api(path, body) {
   const response = await fetch(`${BASE}/side-chat${path}`, {

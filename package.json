@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "test": "node test/dry-run.mjs && node test/client-render.mjs && node test/regressions.mjs",
-    "test:real": "node test/real-fs.mjs && node test/session-integration.mjs",
+    "test:real": "node test/real-fs.mjs && node test/session-integration.mjs && node test/connection-integration.mjs",
     "test:live": "node test/live.mjs"
   },
   "dsh": {

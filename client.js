@@ -60,6 +60,7 @@ window.__ModuleLoader__.load({
     /* --------------------------------------------------------------- copy */
 
     const zh = {
+      expiredHint: '临时讨论已过期。当前内容仍可复制；重新打开将开始新的讨论。',
       title: '临时会话',
       entry: '临时会话',
       entryOpen: '打开临时会话',
@@ -140,6 +141,7 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      expiredHint: 'This discussion has expired. You can still copy it; reopening starts a new discussion.',
       title: 'Temporary session',
       entry: 'Temporary session',
       entryOpen: 'Open a temporary session',
@@ -395,18 +397,18 @@ window.__ModuleLoader__.load({
     async function confirmClose(closeTab) {
       const state = store.get()
       const pending = state.closeRequested
-      if (!pending || pending.discussionId !== state.discussion?.discussionId || pending.tag !== state.tag || pending.parentSessionId !== state.parentSessionId) return
+      if (!pending || (pending.discussionId && pending.discussionId !== state.discussion?.discussionId) || pending.tag !== state.tag || pending.parentSessionId !== state.parentSessionId) return
       if (!await closeDiscussion({ keepTab: Boolean(pending.reopen), closeTab })) return
       if (pending.reopen) await openDiscussion(pending.reopen.parentSessionId, pending.reopen.question)
     }
 
     async function openDiscussion(parentSessionId, question) {
       const existing = store.get()
-      if (existing.parentSessionId === parentSessionId && existing.discussion && existing.status !== 'error') {
+      if (existing.parentSessionId === parentSessionId && existing.discussion && existing.status !== 'error' && existing.status !== 'expired') {
         if (question) sendQuestion(question)
         return existing.discussion
       }
-      if (existing.discussion) {
+      if (existing.discussion && existing.status !== 'expired') {
         requestClose({ parentSessionId, question })
         return undefined
       }
@@ -431,7 +433,7 @@ window.__ModuleLoader__.load({
           api('/close', { discussionId: result.discussion.discussionId }).catch(() => {})
           return undefined
         }
-        store.set({ status: 'idle', discussion: result.discussion, tag: undefined, lastStats: null })
+        store.set({ status: 'idle', discussion: result.discussion, tag, lastStats: null })
         loadModels()
         const pending = store.get().pendingQuestion
         if (pending) {
@@ -455,6 +457,12 @@ window.__ModuleLoader__.load({
         body: JSON.stringify(body),
         signal,
       })
+      if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+        const result = await response.json()
+        const error = new Error(result.message || `HTTP ${response.status}`)
+        error.code = result.code
+        throw error
+      }
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -500,9 +508,9 @@ window.__ModuleLoader__.load({
           live.status = frame.status === 'stopped' ? 'stopped' : frame.status === 'error' ? 'error' : 'done'
           live.text = typeof frame.text === 'string' ? frame.text : live.text
           if (Array.isArray(frame.process)) live.process = frame.process
-          live.stats = frame.stats ?? null
+          live.stats = frame.stats ? { ...frame.stats, steps: frame.steps ?? frame.stats.steps } : null
           live.streaming = false
-          store.set({ live: { ...live }, lastStats: frame.type === 'done' ? frame.stats ?? null : store.get().lastStats })
+          store.set({ live: { ...live }, lastStats: live.stats })
           return
         }
         store.set({ live: { ...live } })
@@ -557,6 +565,10 @@ window.__ModuleLoader__.load({
         await streamTurn({ discussionId, requestId, text: question }, answer, request.controller.signal)
       } catch (error) {
         if (ownsRequest()) {
+          if (error.code === 'discussion-gone') {
+            store.set({ status: 'expired', live: null, requestId: null, closeRequested: null, notice: null })
+            return
+          }
           reportFailure('send', error)
           store.set({ live: { ...(store.get().live ?? answer), status: 'error', error: String(error?.message ?? error) } })
         }
@@ -816,7 +828,7 @@ window.__ModuleLoader__.load({
       const total = input + output + cacheRead + cacheWrite
       const billed = input + cacheRead + cacheWrite
       const percent = billed > 0 ? Math.round((cacheRead / billed) * 100) : 0
-      const tokPerSec = lastStats && Number(lastStats.totalMs) > 0 ? Math.round(output / (Number(lastStats.totalMs) / 1000)) : 0
+      const tokPerSec = lastStats && Number(lastStats.totalMs) > 0 ? Math.round(Number(lastStats.outputTokens ?? 0) / (Number(lastStats.totalMs) / 1000)) : 0
       const steps = Number(lastStats?.steps ?? discussion?.steps ?? 0)
       const parts = [
         `${turns} 轮 ${steps} 步`,
@@ -1105,6 +1117,9 @@ window.__ModuleLoader__.load({
             ),
           ),
         ) : null,
+        state.status === 'expired' ? h('div', { className: 'sc-notice', 'data-kind': 'error' },
+          h('span', null, t('expiredHint')),
+          h('button', { type: 'button', className: 'sc-btn', onClick: () => openDiscussion(ownerSessionId) }, t('reopen'))) : null,
         state.openError && state.status !== 'error' ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, state.openError) : null,
         !discussion && state.status === 'creating' ? h(PreparingState, { t }) : null,
         !discussion && state.status === 'closed' ? h('div', { className: 'sc-empty' },
@@ -1243,7 +1258,7 @@ window.__ModuleLoader__.load({
                             className: 'sc-primary',
                             style: ROUND_BUTTON,
                             onClick: submit,
-                            disabled: draft.trim().length === 0,
+                            disabled: draft.trim().length === 0 || state.status !== 'idle',
                             title: t('send'),
                             'aria-label': t('send'),
                           },

@@ -356,6 +356,7 @@ const ctx = {
   // Cordis exposes injected services as context properties; `inject` guarantees
   // these exist in a real profile.
   llm,
+  connection: { admit: () => ({ peer: {} }) },
   fs,
   webServer: {
     register(route) {
@@ -545,8 +546,8 @@ await check('streams a read-only tool round and a final answer', async () => {
   assert.match(done.text, /不需要改动/)
   assert.equal(done.stats.toolCalls, 1)
   assert.equal(done.stats.cacheReported, true)
-  assert.equal(done.stats.cacheReadTokens, 7)
-  assert.equal(done.stats.inputTokens, 42)
+  assert.equal(done.stats.cacheReadTokens, 10)
+  assert.equal(done.stats.inputTokens, 53)
   assert.ok(typeof done.stats.ttfbMs === 'number')
   // Every frame is instance- and request-scoped.
   for (const frame of result.frames) {
@@ -746,6 +747,7 @@ await check('keeps the inherited tool pair intact after a budget cut', async () 
     const open = await call('POST', '/side-chat/open', { parentSessionId: 'session-1' })
     const discussion = open.json.discussion
     assert.equal(discussion.truncated, true, 'the snapshot was trimmed to the budget')
+    tokenScale = 1 // The inflated estimator above exercises startup trimming only.
     llm.queue(() => textStream(['裁剪后仍然成对。'], { inputTokens: 12, outputTokens: 4 }))
     await call('POST', '/side-chat/send', { discussionId: discussion.discussionId, requestId: 'req-trim', text: '再看一次' })
     const wire = assertProviderAcceptable(llm.requests.at(-1).messages, 'trimmed turn')
@@ -945,6 +947,157 @@ await check('closing during the tool-free finish aborts it and removes the memor
   await pending.finished
   assert.equal(signal.aborted, true)
   assert.equal(discussionSessions.has(sessionId), false)
+})
+
+await check('every plugin endpoint uses host admission before parsing or dispatching', async () => {
+  const original = ctx.connection.admit
+  const before = llm.requests.length
+  try {
+    for (const rejection of [401, 403]) {
+      ctx.connection.admit = () => ({ rejection })
+      for (const endpoint of ['ping', 'models', 'open', 'send', 'cancel', 'close', 'model', 'compact']) {
+        const result = await call(endpoint === 'ping' || endpoint === 'models' ? 'GET' : 'POST', `/side-chat/${endpoint}`, {})
+        assert.equal(result.status, rejection)
+        assert.equal(result.json.ok, false)
+      }
+    }
+    assert.equal(llm.requests.length, before)
+  } finally { ctx.connection.admit = original }
+})
+
+await check('usage sums calls but counts cumulative chunks once per call', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: true })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  llm.queue(async function* () {
+    yield { type: 'usage', usage: { inputTokens: 5, outputTokens: 1 } }
+    yield* toolCallStream()
+  })
+  llm.queue(async function* () {
+    yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 2 } }
+    yield* textStream(['answer'], { inputTokens: 42, outputTokens: 9, cacheReadTokens: 7 })
+  })
+  const frames = []
+  await runtime.send({ discussionId: d.discussionId, requestId: 'usage', text: 'read' }, f => frames.push(f))
+  const stats = frames.at(-1).stats
+  assert.equal(stats.inputTokens, 53)
+  assert.equal(stats.outputTokens, 13)
+  assert.equal(stats.cacheReadTokens, 10)
+  runtime.closeAll()
+})
+
+await check('oversized questions never reach provider and do not poison later turns', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: false })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  const original = llm.resolveModelInfo
+  llm.resolveModelInfo = async () => ({ context: { contextWindow: 8000 }, defaultMaxTokens: 1000 })
+  try {
+    const before = llm.requests.length, frames = []
+    await runtime.send({ discussionId: d.discussionId, requestId: 'too-big', text: 'X'.repeat(30000) }, f => frames.push(f))
+    assert.equal(llm.requests.length, before)
+    assert.ok(frames.some(f => f.code === 'context-too-large'))
+    llm.queue(() => textStream(['recovered'], {}))
+    const result = await runtime.send({ discussionId: d.discussionId, requestId: 'small', text: 'hello' })
+    assert.equal(result.status, 'done')
+    assert.ok(!JSON.stringify(llm.requests.at(-1).messages).includes('X'.repeat(100)))
+  } finally { llm.resolveModelInfo = original; runtime.closeAll() }
+})
+
+await check('long conversations compress automatically and every request fits its model budget', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: false })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  const originalInfo = llm.resolveModelInfo, originalStream = llm.stream
+  llm.resolveModelInfo = async () => ({ context: { contextWindow: 12000 }, defaultMaxTokens: 1000 })
+  let summaries = 0, calls = 0
+  llm.stream = request => {
+    calls++
+    const cost = request.messages.reduce((sum, m) => sum + JSON.stringify(m).length + 8, 0)
+    assert.ok(cost <= 10040, `input ${cost} exceeds budget`)
+    assert.equal(request.maxTokens, 1000)
+    assertProviderAcceptable(request.messages, 'budgeted request')
+    const compacting = JSON.stringify(request.messages).includes('只输出摘要正文')
+    if (compacting) summaries++
+    return textStream([compacting ? 'Earlier findings remain relevant.' : 'A'.repeat(1800)], { inputTokens: 20, outputTokens: 5 })
+  }
+  try {
+    for (let n = 0; n < 9; n++) {
+      const result = await runtime.send({ discussionId: d.discussionId, requestId: `long-${n}`, text: `question-${n} ` + 'Q'.repeat(1200) })
+      assert.equal(result.status, 'done')
+    }
+    assert.ok(summaries > 0)
+    assert.ok(calls > 9)
+  } finally { llm.resolveModelInfo = originalInfo; llm.stream = originalStream; runtime.closeAll() }
+})
+
+await check('large tool output is clipped on the next request with valid provider pairs', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: true })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  const originalInfo = llm.resolveModelInfo, originalFile = FILES.get('/ws/README.md')
+  llm.resolveModelInfo = async () => ({ context: { contextWindow: 10000 }, defaultMaxTokens: 1000 })
+  FILES.set('/ws/README.md', 'A'.repeat(20000))
+  try {
+    llm.queue(() => toolCallStream())
+    llm.queue(request => {
+      const size = request.messages.reduce((sum, m) => sum + JSON.stringify(m).length + 8, 0) + JSON.stringify(request.tools).length + 200
+      assert.ok(size < 8200)
+      assertProviderAcceptable(request.messages, 'large tool output')
+      assert.ok(JSON.stringify(request.messages).includes('裁剪'))
+      return textStream(['bounded answer'], {})
+    })
+    const result = await runtime.send({ discussionId: d.discussionId, requestId: 'large-tool', text: 'read' })
+    assert.equal(result.status, 'done')
+  } finally { llm.resolveModelInfo = originalInfo; FILES.set('/ws/README.md', originalFile); runtime.closeAll() }
+})
+
+await check('automatic summary failure falls back within budget and model changes use the new limit', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: false })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  const oldInfo = llm.resolveModelInfo, oldStream = llm.stream
+  let small = false, failedSummary = false
+  llm.resolveModelInfo = async () => ({ context: { contextWindow: small ? 8000 : 128000 }, defaultMaxTokens: 1000 })
+  llm.stream = request => {
+    if (JSON.stringify(request.messages).includes('只输出摘要正文')) {
+      failedSummary = true
+      return textStream(['partial summary'], {}, { kind: 'error', failure: { message: 'summary failed' } })
+    }
+    if (small) {
+      const size = request.messages.reduce((n, m) => n + JSON.stringify(m).length + 8, 0)
+      assert.ok(size <= 6360)
+      assert.ok(!JSON.stringify(request.messages).includes('partial summary'))
+    }
+    return textStream(['A'.repeat(1500)], {})
+  }
+  try {
+    for (let n = 0; n < 4; n++) await runtime.send({ discussionId: d.discussionId, requestId: `before-${n}`, text: 'Q'.repeat(1000) })
+    small = true
+    const result = await runtime.send({ discussionId: d.discussionId, requestId: 'after-switch', text: 'short current question' })
+    assert.equal(result.status, 'done')
+    assert.equal(failedSummary, true)
+  } finally { llm.resolveModelInfo = oldInfo; llm.stream = oldStream; runtime.closeAll() }
+})
+
+await check('stop during automatic compaction aborts only that discussion and permits a later answer', async () => {
+  const runtime = createDiscussionRuntime(ctx, { tools: false })
+  const d = await runtime.open({ parentSessionId: 'session-1' })
+  const oldInfo = llm.resolveModelInfo, oldStream = llm.stream
+  let small = false, began
+  const started = new Promise(resolve => { began = resolve })
+  llm.resolveModelInfo = async () => ({ context: { contextWindow: small ? 8000 : 128000 }, defaultMaxTokens: 1000 })
+  llm.stream = request => {
+    if (JSON.stringify(request.messages).includes('只输出摘要正文')) { began(); return hangingStream(request.signal) }
+    return textStream(['A'.repeat(1500)], {})
+  }
+  try {
+    for (let n = 0; n < 4; n++) await runtime.send({ discussionId: d.discussionId, requestId: `seed-${n}`, text: 'Q'.repeat(1000) })
+    small = true
+    const pending = runtime.send({ discussionId: d.discussionId, requestId: 'stop-summary', text: 'current question' })
+    await started
+    runtime.cancel(d.discussionId, 'stop-summary')
+    assert.equal((await pending).status, 'stopped')
+    assert.equal(runtime.get(d.discussionId).generating, false)
+    small = false
+    assert.equal((await runtime.send({ discussionId: d.discussionId, requestId: 'recover-summary', text: 'continue' })).status, 'done')
+    assert.ok(ctx.sessions.get('session-1'))
+  } finally { llm.resolveModelInfo = oldInfo; llm.stream = oldStream; runtime.closeAll() }
 })
 
 console.log(`\n${failures.length === 0 ? 'all checks passed' : `${failures.length} check(s) failed`}\n`)
