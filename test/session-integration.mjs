@@ -109,20 +109,79 @@ await check('an empty inherited prefix creates a valid Session without leaking a
   s.runtime.closeAll()
 })
 
-await check('snapshot budget trimming affects actual requests without invalidating the seed', async () => {
+await check('an oversized full snapshot is refused before creating a private Session', async () => {
   const s = setup()
   s.llm.resolveModelInfo = async () => ({ context: { contextWindow: 8000 }, defaultMaxTokens: 100 })
   const previousGet = s.ctx.get
-  s.ctx.get = (name) => name === 'tokenMeter' ? { estimateMessage: () => 4500 } : previousGet(name)
+  s.ctx.get = name => name === 'tokenMeter' ? { estimateMessage: () => 4500 } : previousGet(name)
+  assert.equal((await captureSnapshot(s.ctx, 'parent')).code, 'snapshot-too-large')
+  await assert.rejects(s.runtime.open({ parentSessionId: 'parent' }), error => error.code === 'snapshot-too-large')
+  assert.equal(s.prepared.size, 0)
+  assert.equal(s.requests.length, 0)
+  s.ctx.get = previousGet
   const snapshot = await captureSnapshot(s.ctx, 'parent')
-  assert.equal(snapshot.truncated, true)
   const view = await s.runtime.open({ parentSessionId: 'parent' })
-  assert.ok(s.prepared.get(view.sessionId))
-  // The inflated startup estimator above intentionally exceeds the snapshot budget.
-  s.ctx.get = (name) => name === 'tokenMeter' ? { estimateMessage: m => JSON.stringify(m).length } : previousGet(name)
   await s.runtime.send({ discussionId: view.discussionId, requestId: 'one', text: 'discussion-question' })
   assert.deepEqual(s.requests[0].messages.slice(0, snapshot.messages.length), snapshot.messages)
-  assert.equal(hasText(s.requests[0].messages, 'parent-question'), false)
+  s.runtime.closeAll()
+})
+
+// Same surface replacement contract used by dsh-compaction-basic; the summary
+// text is a fixture, but projection and replacement are real SessionStore code.
+function replaceSurface(parent, text, nodes = [...parent.surface.nodes]) {
+  return parent.append('user/message', message('user', text), {
+    surfaceOp: { op: 'replace', startSeq: nodes[0], endSeq: nodes.at(-1) },
+    sourceEventSeqs: nodes,
+  })
+}
+
+await check('reopen reads post-turn main compaction while an existing discussion keeps its original snapshot', async () => {
+  const s = setup()
+  s.parent.append('turn/start', { turn: 2 })
+  s.parent.append('user/message', message('user', 'retained-tail'), { surfaceOp: 'append' })
+  s.parent.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  const original = (await captureSnapshot(s.ctx, 'parent')).messages
+  const first = await s.runtime.open({ parentSessionId: 'parent' })
+  replaceSurface(s.parent, 'first-main-summary', s.parent.surface.nodes.slice(0, 2))
+  const snapshot = await captureSnapshot(s.ctx, 'parent')
+  assert.equal(snapshot.excludedInflight, false)
+  assert.deepEqual(snapshot.messages, s.parent.deriveMessages())
+  assert.ok(hasText(snapshot.messages, 'first-main-summary'))
+  assert.ok(hasText(snapshot.messages, 'retained-tail'))
+  assert.equal(hasText(snapshot.messages, 'parent-question'), false)
+  const parentEvents = s.parent.snapshotEvents()
+  await s.runtime.send({ discussionId: first.discussionId, requestId: 'frozen', text: 'question' })
+  assert.deepEqual(s.requests.at(-1).messages.slice(0, original.length), original)
+  s.runtime.close(first.discussionId)
+  const second = await s.runtime.open({ parentSessionId: 'parent' })
+  await s.runtime.send({ discussionId: second.discussionId, requestId: 'fresh', text: 'question' })
+  assert.deepEqual(s.requests.at(-1).messages.slice(0, snapshot.messages.length), snapshot.messages)
+  assert.equal(hasText(s.requests.at(-1).messages, 'parent-question'), false)
+  assert.deepEqual(s.parent.snapshotEvents(), parentEvents)
+  s.runtime.closeAll()
+})
+
+await check('repeated post-turn replacements retain the latest summary and exclude an unfinished turn', async () => {
+  const s = setup()
+  replaceSurface(s.parent, 'first-summary')
+  replaceSurface(s.parent, 'second-summary')
+  s.parent.append('turn/start', { turn: 2 })
+  s.parent.append('user/message', message('user', 'unfinished-question'), { surfaceOp: 'append' })
+  const snapshot = await captureSnapshot(s.ctx, 'parent')
+  assert.ok(snapshot.ok)
+  assert.equal(snapshot.excludedInflight, true)
+  assert.ok(hasText(snapshot.messages, 'second-summary'))
+  assert.equal(hasText(snapshot.messages, 'first-summary'), false)
+  assert.equal(hasText(snapshot.messages, 'unfinished-question'), false)
+  s.runtime.closeAll()
+})
+
+await check('a replacement mixing completed and unfinished history is refused, not silently lost', async () => {
+  const s = setup()
+  s.parent.append('turn/start', { turn: 2 })
+  s.parent.append('user/message', message('user', 'unfinished-question'), { surfaceOp: 'append' })
+  replaceSurface(s.parent, 'mixed-summary')
+  assert.equal((await captureSnapshot(s.ctx, 'parent')).code, 'snapshot-busy')
   s.runtime.closeAll()
 })
 
@@ -143,6 +202,8 @@ await check('compact replaces older request history with the summary in Session 
   assert.ok(s.prepared.get(view.sessionId))
   await threeTurns(s.runtime, view.discussionId)
   assert.equal((await s.runtime.compact(view.discussionId)).compacted, true)
+  assert.equal(hasText(s.requests.at(-1).messages, 'parent-question'), false, 'main snapshot never enters the summarizer')
+  assert.equal(hasText(s.requests.at(-1).messages, 'parent-answer'), false)
   await s.runtime.send({ discussionId: view.discussionId, requestId: 'after', text: 'after-compaction' })
   const messages = s.requests.at(-1).messages
   assert.equal(hasText(messages, 'unique-question-0'), false)

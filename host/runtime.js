@@ -76,6 +76,14 @@ export function createDiscussionRuntime(ctx, options = {}) {
       toolNames: toolbox ? [...READ_ONLY_TOOL_NAMES] : [],
     })
     const instructionMessage = message('system', instruction, { kind: 'system-prompt' })
+    const openingBudget = snapshot.route.provider && snapshot.route.model ? await resolveBudget(ctx, snapshot.route) : null
+    try {
+      fitMessages([...snapshot.messages, instructionMessage], toolbox?.schemas, openingBudget)
+    } catch (error) {
+      error.code = 'snapshot-too-large'
+      error.message = '主会话的有效上下文过大，无法完整打开临时会话。请在主会话上下文缩短后重试。'
+      throw error
+    }
 
     // Private memory Session: retain validated event/usage records without
     // entering the shared store or triggering catalog/persistence listeners.
@@ -87,7 +95,8 @@ export function createDiscussionRuntime(ctx, options = {}) {
       seededTurnNumber = seededTurn(parent, snapshot.boundarySeq)
       const to = (snapshot.boundarySeq ?? -1) + 1
       // Session seeds must retain contiguous original seqs and all references.
-      // Budget trimming affects the request messages, never the event log.
+      // This optional event record ends at turn/end. Model requests use the
+      // effective snapshot, including later replacements of completed history.
       const seed = parent && to > 0 ? [...parent.snapshotEvents(0, to)] : []
       const prepared = ctx.sessions.prepare(sessionId, {
         seed,
@@ -384,10 +393,8 @@ export function createDiscussionRuntime(ctx, options = {}) {
             messages = buildMessages()
           }
         }
-        const fitted = fitMessages(messages, offeredTools, budget, [discussion.rules, questionMessage, ...(finalInstruction ? [finalInstruction] : [])])
-        messages = fitted.messages
-        if (fitted.trimmed) emit({ type: 'notice', level: 'info', message: '上下文较长，本次已裁剪旧参考或工具正文。' })
         if (controller.signal.aborted) throw controller.signal.reason
+        messages = fitMessages(messages, offeredTools, budget).messages
         if (session && finalReason) {
           appendSafe(session, 'system/message', { turn: turnNumber, step, message: messages.at(-1) }, { surfaceOp: 'append' }, log)
         }
@@ -420,8 +427,8 @@ export function createDiscussionRuntime(ctx, options = {}) {
         const request = {
           provider: route.provider,
           model: route.model,
-          // One request-history authority, including snapshot budget trimming
-          // and compaction. The memory Session is only the event/usage record.
+          // One request-history authority, including the fixed parent snapshot
+          // and discussion-only compaction. The memory Session is only the event/usage record.
           messages: [...messages],
           signal: controller.signal,
           ...(budget ? { maxTokens: budget.maxTokens } : {}),

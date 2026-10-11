@@ -60,6 +60,8 @@ window.__ModuleLoader__.load({
     /* --------------------------------------------------------------- copy */
 
     const zh = {
+      contextTooLarge: '当前讨论内容过长，请重新打开临时会话。重新打开会清空本次讨论，并获取主会话的最新上下文。',
+      snapshotTooLarge: '主会话的有效上下文过大，无法完整打开临时会话。请在主会话上下文缩短后重试。',
       expiredHint: '临时讨论已过期。当前内容仍可复制；重新打开将开始新的讨论。',
       title: '临时会话',
       entry: '临时会话',
@@ -142,6 +144,8 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      contextTooLarge: 'This discussion is too long. Please reopen the temporary session. Reopening clears this discussion and loads the main session’s latest context.',
+      snapshotTooLarge: 'The main session’s active context is too large to open a complete temporary session. Try again after the main context becomes shorter.',
       expiredHint: 'This discussion has expired. You can still copy it; reopening starts a new discussion.',
       title: 'Temporary session',
       entry: 'Temporary session',
@@ -430,7 +434,7 @@ window.__ModuleLoader__.load({
       })
       try {
         const result = await api('/open', { parentSessionId, tag })
-        if (!result.ok) throw new Error(result.message || '打开失败')
+        if (!result.ok) throw Object.assign(new Error(result.message || '打开失败'), { code: result.code })
         if (store.get().tag !== tag) {
           api('/close', { discussionId: result.discussion.discussionId }).catch(() => {})
           return undefined
@@ -446,7 +450,7 @@ window.__ModuleLoader__.load({
       } catch (error) {
         if (store.get().tag !== tag) return undefined
         reportFailure('open', error)
-        store.set({ status: 'error', openError: String(error?.message ?? error) })
+        store.set({ status: 'error', openError: String(error?.message ?? error), openErrorCode: error.code })
         return undefined
       }
     }
@@ -505,6 +509,7 @@ window.__ModuleLoader__.load({
           live.notice = frame.message
         } else if (frame.type === 'error') {
           live.error = frame.message
+          live.errorCode = frame.code
         } else if (frame.type === 'done') {
           completed = true
           live.status = frame.status === 'stopped' ? 'stopped' : frame.status === 'error' ? 'error' : 'done'
@@ -572,7 +577,7 @@ window.__ModuleLoader__.load({
             return
           }
           reportFailure('send', error)
-          store.set({ live: { ...(store.get().live ?? answer), status: 'error', error: String(error?.message ?? error) } })
+          store.set({ live: { ...(store.get().live ?? answer), status: 'error', error: String(error?.message ?? error), errorCode: error.code } })
         }
       } finally {
         if (activeRequest === request) activeRequest = null
@@ -967,7 +972,7 @@ window.__ModuleLoader__.load({
         message.notice ? h('div', { className: 'sc-notice' }, message.notice) : null,
         message.status === 'stopped' ? h('div', { className: 'sc-tool-status' }, t('stopped')) : null,
         !streaming && message.error
-          ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, fill(t('error'), { message: message.error }))
+          ? h('div', { className: 'sc-notice', 'data-kind': 'error' }, fill(t('error'), { message: message.errorCode === 'context-too-large' ? t('contextTooLarge') : message.error }))
           : null,
         !streaming && message.error && onRecover ? h('button', { type: 'button', className: 'sc-btn', onClick: onRecover }, t('recoverQuestion')) : null,
         !streaming && body ? h(AnswerActions, { t, body, parentSessionId, notify }) : null,
@@ -1138,7 +1143,7 @@ window.__ModuleLoader__.load({
                 h('circle', { cx: 12, cy: 12, r: 9, stroke: 'currentColor', strokeWidth: 1.4 }),
                 h('path', { d: 'M12 7.5v5.5M12 16.5v.5', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
               ),
-              h('div', { className: 'sc-empty-title' }, fill(t('error'), { message: state.openError ?? '' })),
+              h('div', { className: 'sc-empty-title' }, fill(t('error'), { message: state.openErrorCode === 'snapshot-too-large' ? t('snapshotTooLarge') : state.openError ?? '' })),
               h('button', { type: 'button', className: 'sc-btn', onClick: () => openDiscussion(ownerSessionId) }, t('retryOpen')),
             )
           : null,

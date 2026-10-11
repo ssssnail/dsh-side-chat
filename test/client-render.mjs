@@ -498,6 +498,19 @@ await check('failed answers can return the original question to the input withou
   assert.equal(calls.filter(call => call.url.endsWith('/send')).length, before)
 })
 
+await check('capacity errors explain reopening in the selected language', async () => {
+  const panel = registrations.find(item => item.options.name === 'sidebar.right.pane.tab')
+  responseFrames = [{ type: 'error', code: 'context-too-large', message: 'host capacity error' }, { type: 'done', status: 'error', text: '' }]
+  let tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'textarea').props.onChange({ target: { value: 'capacity-question' } })
+  tree = render(panel.component, panelProps)
+  find(tree, element => element.type === 'button' && element.props.title === '发送').props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.match(textOf(render(panel.component, panelProps)), /重新打开会清空本次讨论，并获取主会话的最新上下文/)
+  const english = key => dictionaries.sideChat.en[key] ?? key
+  assert.match(textOf(render(panel.component, { ...panelProps, t: english })), /Reopening clears this discussion and loads the main session’s latest context/)
+})
+
 await check('real useTabInfo injection: cancel preserves the tab, confirm clears and removes it', async () => {
   assert.ok(ctx.sidebarRight.closeHandler, 'the close handler is registered')
   const panel = registrations.find((item) => item.options.name === 'sidebar.right.pane.tab')

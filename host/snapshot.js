@@ -51,32 +51,44 @@ export async function captureSnapshot(ctx, parentSessionId, log = () => {}) {
     completedTurns += 1
   }
 
+  // Compaction can replace completed history AFTER turn/end. Classify the
+  // replacement by its shadowed surface span, not its new event sequence.
+  const eligible = completedSurface(events, boundarySeq)
   const entries = []
   const nodes = session.surface?.nodes ?? []
   let excludedInflight = false
   for (const seq of nodes) {
-    if (entries.length >= MAX_SNAPSHOT_MESSAGES) break
-    if (boundarySeq < 0 || seq > boundarySeq) {
+    if (eligible.get(seq) === 'mixed') {
+      return { ok: false, code: 'snapshot-busy', message: '主会话正在整理未完成的上下文，请稍后重新打开临时会话。' }
+    }
+    if (boundarySeq < 0 || !(eligible.get(seq) ?? (seq <= boundarySeq))) {
       excludedInflight = true
       continue
     }
     const event = session.eventAt(seq)
-    if (!event) continue
+    if (!event) return { ok: false, code: 'snapshot-unavailable', message: '无法完整读取主会话上下文，请稍后重新打开临时会话。' }
     let message = null
     try {
       message = session.deriveEventMessage(event)
     } catch (error) {
       log({ stage: 'derive', type: event.type, error: String(error?.message ?? error) })
-      message = null
+      return { ok: false, code: 'snapshot-unavailable', message: '无法完整读取主会话上下文，请稍后重新打开临时会话。' }
     }
     if (message) entries.push({ seq, message })
+    if (entries.length > MAX_SNAPSHOT_MESSAGES) {
+      return { ok: false, code: 'snapshot-too-large', message: '主会话的有效上下文过大，无法完整打开临时会话。请在主会话上下文缩短后重试。' }
+    }
   }
   if (boundarySeq < 0 && nodes.length > 0) excludedInflight = true
 
   const selected = selectRoute(ctx, session)
   const contextWindow = await resolveContextWindow(ctx, selected, log)
-  const trimmed = trimToBudget(ctx, entries, contextWindow, log)
-  const messages = trimmed.entries.map((entry) => entry.message)
+  const meter = ctx.get('tokenMeter')
+  const estimatedTokens = meter ? entries.reduce((sum, entry) => sum + meter.estimateMessage(entry.message) + 8, 0) : 0
+  if (contextWindow && meter && estimatedTokens > contextWindow.budget) {
+    return { ok: false, code: 'snapshot-too-large', message: '主会话的有效上下文过大，无法完整打开临时会话。请在主会话上下文缩短后重试。' }
+  }
+  const messages = entries.map((entry) => entry.message)
 
   return {
     ok: true,
@@ -88,15 +100,15 @@ export async function captureSnapshot(ctx, parentSessionId, log = () => {}) {
     completedTurns,
     excludedInflight,
     empty: messages.length === 0,
-    truncated: trimmed.truncated,
-    omittedMessages: trimmed.omitted,
-    estimatedTokens: trimmed.tokens,
+    truncated: false,
+    omittedMessages: 0,
+    estimatedTokens,
     contextWindow,
     route: selected,
     parentLabel: firstUserLabel(messages) ?? shortId(parentSessionId),
     messages,
-    /** First kept surface node, so a seeded Session can start exactly there. */
-    firstKeptSeq: trimmed.entries[0]?.seq,
+    /** First effective surface node, for snapshot provenance. */
+    firstKeptSeq: entries[0]?.seq,
   }
 }
 
@@ -184,40 +196,30 @@ async function resolveContextWindow(ctx, route, log) {
   }
 }
 
-/**
- * Trim the inherited prefix to the budget by dropping the OLDEST messages.
- * Dropping breaks prefix reuse, which the design accepts as the necessary cost
- * of staying inside the window; it is reported to the user rather than hidden.
- * A leading tool result is dropped too, so the request never starts with an
- * orphan answer to a call the model can no longer see.
- */
-function trimToBudget(ctx, entries, resolved, log) {
-  const meter = ctx.get('tokenMeter')
-  const sizes = entries.map((entry) => {
-    if (!meter) return 0
-    try {
-      return meter.estimateMessage(entry.message) ?? 0
-    } catch {
-      return 0
+/** Replay only surface membership to track safe post-turn replacements. */
+function completedSurface(events, boundarySeq) {
+  const active = []
+  const eligible = new Map()
+  for (const event of events) {
+    const op = event.surfaceOp
+    if (!op) continue
+    let safe = event.seq <= boundarySeq
+    if (op !== 'append' && op.op === 'replace') {
+      const start = active.indexOf(op.startSeq)
+      const end = active.indexOf(op.endSeq)
+      if (start < 0 || end < start) throw new Error('Invalid parent surface replacement')
+      if (event.seq > boundarySeq) {
+        const states = active.slice(start, end + 1).map(seq => eligible.get(seq))
+        safe = states.every(value => value === true) ? true
+          : states.every(value => value === false) ? false : 'mixed'
+      }
+      active.splice(start, end - start + 1, event.seq)
+    } else {
+      active.push(event.seq)
     }
-  })
-  let total = sizes.reduce((sum, size) => sum + size, 0)
-  if (!resolved || entries.length === 0) {
-    return { entries, truncated: false, omitted: 0, tokens: total }
+    eligible.set(event.seq, safe)
   }
-  const { budget } = resolved
-  if (budget <= 0 || total <= budget) return { entries, truncated: false, omitted: 0, tokens: total }
-  let start = 0
-  while (start < entries.length - 1 && total > budget) {
-    total -= sizes[start]
-    start += 1
-  }
-  while (start < entries.length - 1 && entries[start]?.message?.role === 'tool') {
-    total -= sizes[start]
-    start += 1
-  }
-  log({ stage: 'trim', omitted: start, tokens: total })
-  return { entries: entries.slice(start), truncated: start > 0, omitted: start, tokens: total }
+  return eligible
 }
 
 /** A short human label for the parent session, taken from its own first prompt. */

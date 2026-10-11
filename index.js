@@ -30,7 +30,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000
  * process keeps the JavaScript generation it loaded, so this is how a live
  * profile confirms whether an edit took effect without a restart.
  */
-const PLUGIN_REVISION = 12
+const PLUGIN_REVISION = 13
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - host context.
