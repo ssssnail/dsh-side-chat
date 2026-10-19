@@ -13,7 +13,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 async function clientHarness() {
   const source = (await readFile(new URL('../client.js', import.meta.url), 'utf8'))
-    .replace('return { inject, apply }', 'return { inject, apply, testing: { store, sendQuestion, stopAnswer, openDiscussion, closeDiscussion, requestClose, confirmClose, setSidebar(value) { sidebar = value } } }')
+    .replace('return { inject, apply }', 'return { inject, apply, testing: { store, sendQuestion, stopAnswer, openDiscussion, closeDiscussion, requestClose, confirmClose, showDiscussion, setSidebar(value) { sidebar = value } } }')
   let definition
   const streams = [], calls = []
   let openResponse
@@ -47,6 +47,28 @@ async function clientHarness() {
 }
 
 console.log('\nside-chat lifecycle and search regressions\n')
+await check('button and slash launches share initialization and preserve an active discussion', async () => {
+  const client = await clientHarness(), tabs = []
+  client.setSidebar({ openTab(kind) { tabs.push(kind) } })
+  let accept
+  client.setOpenResponse(() => new Promise(resolve => { accept = resolve }))
+  const opening = client.showDiscussion('bound-parent')
+  client.showDiscussion('bound-parent')
+  assert.equal(client.calls.filter(call => call.url.endsWith('/open')).length, 1)
+  assert.equal(client.calls[0].body.parentSessionId, 'bound-parent')
+  accept(new Response(JSON.stringify({ ok: true, discussion: { discussionId: 'shared', parentSessionId: 'bound-parent' } })))
+  await opening
+  client.store.set({ status: 'generating', messages: [{ text: 'keep this discussion' }], requestId: 'keep-request' })
+  await client.showDiscussion('bound-parent')
+  assert.equal(client.store.get().status, 'generating')
+  assert.equal(client.store.get().requestId, 'keep-request')
+  assert.equal(client.store.get().messages[0].text, 'keep this discussion')
+  assert.equal(client.calls.filter(call => call.url.endsWith('/open')).length, 1)
+  const before = tabs.length
+  client.showDiscussion(undefined)
+  assert.equal(tabs.length, before)
+})
+
 await check('late stream and finally cannot write into a reopened discussion', async () => {
   const client = await clientHarness()
   client.store.set({ status: 'idle', discussion: { discussionId: 'old' }, parentSessionId: 'old-parent' })

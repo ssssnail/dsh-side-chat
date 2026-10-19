@@ -114,6 +114,7 @@ globalThis.fetch = async (url, options = {}) => {
 await import('../client.js')
 assert.ok(captured, 'client bundle registered a factory')
 
+const commands = []
 const registrations = []
 const tabTypes = []
 const dictionaries = {}
@@ -138,6 +139,7 @@ const ctx = {
     openTab(kind) { openedTabs.push(kind) },
     registerCloseHandler(kind, handler) { this.closeHandler = { kind, handler }; return () => {} },
   },
+  commandUi: { register(definition) { commands.push(definition); return () => {} } },
   sidebarRightTabs: { register(definition) { tabTypes.push(definition); return () => {} } },
 }
 
@@ -227,8 +229,10 @@ async function check(label, fn) {
 
 console.log('\nside-chat client panel\n')
 
-await check('declares the services the panel needs', () => {
-  assert.deepEqual(plugin.inject, ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs'])
+await check('declares the command service and its client module dependency', async () => {
+  assert.deepEqual(plugin.inject, ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'commandUi'])
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-commands'))
 })
 
 await check('registers the entry, the tab type and the panel', () => {
@@ -237,7 +241,7 @@ await check('registers the entry, the tab type and the panel', () => {
   assert.ok(registrations.some((item) => item.options.name === 'sidebar.right.pane.tab'), 'the panel body')
 })
 
-await check('the entry opens the tab and creates the instance', async () => {
+await check('the slash entry creates an instance and the button reuses it', async () => {
   openResult = {
     ok: true,
     discussion: {
@@ -266,10 +270,32 @@ await check('the entry opens the tab and creates the instance', async () => {
   })
   const button = find(tree, (element) => element.type === 'button')
   assert.equal(button.props.title, '临时会话')
+  commands.find(command => command.name === 'side-chat').ui.run({ sessionId: 'session-1' })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const openCount = calls.filter(call => call.url.endsWith('/open')).length
+  assert.equal(openCount, 1)
+  assert.equal(calls.find(call => call.url.endsWith('/open')).body.parentSessionId, 'session-1')
   button.props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 20))
-  assert.deepEqual(openedTabs, ['side-chat'])
+  assert.equal(calls.filter(call => call.url.endsWith('/open')).length, openCount)
+  assert.deepEqual(openedTabs, ['side-chat', 'side-chat'])
   assert.ok(calls.some((call) => call.url.endsWith('/open')), 'the instance was created')
+})
+
+await check('/side-chat is a localized client action using the bound session without sending a prompt', async () => {
+  const command = commands.find(item => item.name === 'side-chat')
+  assert.ok(command)
+  assert.equal(command.ui.kind, 'action')
+  assert.equal(command.label(), '临时会话')
+  assert.match(command.description(), /只读临时讨论/)
+  assert.equal(command.available({ sessionId: 'session-1', generating: true }), true)
+  assert.equal(command.available({}), false)
+  assert.equal(command.available({ sessionId: '' }), false)
+  const before = calls.length
+  command.ui.run({ sessionId: 'session-1' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(openedTabs.at(-1), 'side-chat')
+  assert.equal(calls.length, before, 'an existing discussion is reused, no main or side prompt submitted')
 })
 
 await check('the panel renders the prepared discussion', () => {

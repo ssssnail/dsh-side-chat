@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
     const TAB_KIND = 'side-chat'
     const ROUTE = '/side-chat'
 
-    const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs']
+    const inject = ['slots', 'locale', 'sidebarRight', 'sidebarRightTabs', 'commandUi']
 
     /** Square button metrics; CSS explicitly overrides the theme's corner shape. */
     const ROUND_BUTTON = {
@@ -60,6 +60,7 @@ window.__ModuleLoader__.load({
     /* --------------------------------------------------------------- copy */
 
     const zh = {
+      commandDescription: '打开当前主会话的只读临时讨论区',
       contextTooLarge: '当前讨论内容过长，请重新打开临时会话。重新打开会清空本次讨论，并获取主会话的最新上下文。',
       snapshotTooLarge: '主会话的有效上下文过大，无法完整打开临时会话。请在主会话上下文缩短后重试。',
       expiredHint: '临时讨论已过期。当前内容仍可复制；重新打开将开始新的讨论。',
@@ -144,6 +145,7 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      commandDescription: 'Open a temporary read-only discussion for this session',
       contextTooLarge: 'This discussion is too long. Please reopen the temporary session. Reopening clears this discussion and loads the main session’s latest context.',
       snapshotTooLarge: 'The main session’s active context is too large to open a complete temporary session. Try again after the main context becomes shorter.',
       expiredHint: 'This discussion has expired. You can still copy it; reopening starts a new discussion.',
@@ -406,6 +408,20 @@ window.__ModuleLoader__.load({
       if (!pending || (pending.discussionId && pending.discussionId !== state.discussion?.discussionId) || pending.tag !== state.tag || pending.parentSessionId !== state.parentSessionId) return
       if (!await closeDiscussion({ keepTab: Boolean(pending.reopen), closeTab })) return
       if (pending.reopen) await openDiscussion(pending.reopen.parentSessionId, pending.reopen.question)
+    }
+
+    /** Shared button/slash entry. Reuses an open or initializing discussion. */
+    function showDiscussion(sessionId) {
+      if (typeof sessionId !== 'string' || !sessionId) return
+      try {
+        sidebar?.openTab?.(TAB_KIND)
+      } catch (error) {
+        reportFailure('openTab', error)
+        return
+      }
+      const state = store.get()
+      if (state.parentSessionId === sessionId && state.status === 'creating') return
+      return openDiscussion(sessionId)
     }
 
     async function openDiscussion(parentSessionId, question) {
@@ -766,14 +782,7 @@ window.__ModuleLoader__.load({
       }, [sessionId, inputActions])
 
       const active = state.parentSessionId === sessionId && state.status !== 'closed'
-      const open = useCallback(() => {
-        try {
-          sidebar?.openTab?.(TAB_KIND)
-        } catch (error) {
-          reportFailure('openTab', error)
-        }
-        if (!active) openDiscussion(sessionId)
-      }, [active, sessionId])
+      const open = useCallback(() => showDiscussion(sessionId), [sessionId])
 
       return h(
         React.Fragment,
@@ -1293,6 +1302,14 @@ window.__ModuleLoader__.load({
       sidebar = ctx.sidebarRight
 
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'side-chat:copy')
+
+      ctx.effect(() => ctx.commandUi.register({
+        name: 'side-chat',
+        label: () => copy(ctx, 'entry'),
+        description: () => copy(ctx, 'commandDescription'),
+        available: (session) => typeof session.sessionId === 'string' && session.sessionId.length > 0,
+        ui: { kind: 'action', run: (session) => { showDiscussion(session.sessionId) } },
+      }), 'side-chat:command')
 
       ctx.effect(() => {
         const start = () => composing.add('*')
